@@ -1,16 +1,25 @@
 {
-  "name": "grep_search",
-  "description": "Search for a regex pattern in the codebase files",
-  "input": {
-    "pattern": {
-      "type": "string",
-      "description": "Regex pattern to search for",
-      "required": true
-    },
-    "path": {
-      "type": "string",
-      "description": "Directory to search in (default: current directory)",
-      "required": false
+  "type": "function",
+  "function": {
+    "name": "grep_search",
+    "description": "Search for a regex pattern in the codebase files",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "description": "Regex pattern to search for"
+        },
+        "path": {
+          "type": "string",
+          "description": "Directory to search in (default: current directory)"
+        }
+      },
+      "required": ["pattern"]
     }
+  },
+  "run": {
+    "interpreter": "bash",
+    "script": "grep_search.sh"
   }
 }

@@ -1,11 +1,21 @@
 {
-  "name": "exec_command",
-  "description": "Execute a shell command and return its stdout/stderr output",
-  "input": {
-    "command": {
-      "type": "string",
-      "description": "Shell command to execute",
-      "required": true
+  "type": "function",
+  "function": {
+    "name": "exec_command",
+    "description": "Execute a shell command and return its stdout/stderr output",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "Shell command to execute"
+        }
+      },
+      "required": ["command"]
     }
+  },
+  "run": {
+    "interpreter": "bash",
+    "script": "exec_command.sh"
   }
 }

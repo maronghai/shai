@@ -81,12 +81,19 @@ save_tool_result() {
 
 run_tool() {
     local name="$1" args="$2"
-    local script="$TOOLS_DIR/${name}.sh"
-    if [[ ! -f "$script" ]]; then
+    local tool_def interpreter script_path
+    tool_def=$(echo "$tools_json" | jq -c --arg n "$name" '.[] | select(.function.name == $n)' 2>/dev/null)
+    if [[ -z "$tool_def" || "$tool_def" == "null" ]]; then
         echo "Error: unknown tool '$name'"
         return 1
     fi
-    bash "$script" "$args"
+    interpreter=$(echo "$tool_def" | jq -r '.run.interpreter // "bash"' 2>/dev/null)
+    script_path=$(echo "$tool_def" | jq -r '.run.script // ""' 2>/dev/null)
+    if [[ -z "$script_path" ]]; then
+        echo "Error: tool '$name' has no run.script"
+        return 1
+    fi
+    "$interpreter" "$TOOLS_DIR/$script_path" "$args"
 }
 
 help() {
@@ -152,31 +159,27 @@ load_tools() {
         return
     fi
 
-    local def json tool_obj desc_line
+    local def tool_obj name interpreter script_path desc_line
     for def in "$TOOLS_DIR"/*.json; do
         [[ -f "$def" ]] || continue
-        json=$(cat "$def" 2>/dev/null) || continue
+        tool_obj=$(cat "$def" 2>/dev/null) || continue
 
-        tool_obj=$(echo "$json" | jq -c '
-            {
-                "type": "function",
-                function: {
-                    name: .name,
-                    description: .description,
-                    parameters: {
-                        "type": "object",
-                        properties: (.input // {} | with_entries(.value |= {type, description})),
-                        required: ([.input // {} | to_entries[] | select(.value.required == true) | .key])
-                    }
-                }
-            }' 2>/dev/null) || continue
-        [[ -z "$tool_obj" ]] && continue
+        name=$(echo "$tool_obj" | jq -r '.function.name // ""' 2>/dev/null)
+        [[ "$name" == "" ]] && continue
+        [[ "$(echo "$tool_obj" | jq -r '.type // ""' 2>/dev/null)" != "function" ]] && continue
 
-        desc_line=$(echo "$json" | jq -r '
-            def param_list: .input // {} | to_entries | map("\(.key): \(.value.type)") | join(", ");
-            "  - \(.name)(\(param_list)) - \(.description)"
+        interpreter=$(echo "$tool_obj" | jq -r '.run.interpreter // "bash"' 2>/dev/null)
+        script_path=$(echo "$tool_obj" | jq -r '.run.script // ""' 2>/dev/null)
+        if [[ -z "$script_path" || ! -f "$TOOLS_DIR/$script_path" ]]; then
+            warn "Skipping tool '$name': run.script missing or not found: $script_path"
+            continue
+        fi
+
+        desc_line=$(echo "$tool_obj" | jq -r '
+            def params: .function.parameters.properties // {} | to_entries | map("\(.key): \(.value.type)") | join(", ");
+            "  - \(.function.name)(\(params)) - \(.function.description)"
         ' 2>/dev/null)
-        [[ -z "$desc_line" ]] && continue
+        [[ -z "$desc_line" || "$desc_line" == "null" ]] && continue
 
         tools_json=$(echo "$tools_json" | jj push . "$tool_obj" 2>/dev/null) || continue
         tool_descriptions+="$desc_line"$'\n'

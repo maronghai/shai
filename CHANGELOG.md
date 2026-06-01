@@ -7,14 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- **Tool spec is now the full OpenAI manifest, no rewrite.** Each
+  `tools/<name>.json` file is the complete `{"type":"function", "function":{...}}`
+  object the API expects — `ai-agent.sh` reads it verbatim instead of
+  rebuilding the wrapper in `load_tools()`. The old `input.<param>` schema
+  is gone; the spec uses the standard `function.parameters.{properties,
+  required}` directly. This kills the duplicate definition: previously
+  the tool existed once as JSON in the file and a second time as a
+  `jq` filter in `load_tools()`.
+- **Explicit `run` binding replaces filename coupling.** The `.sh`
+  implementation is no longer matched by `<name>.sh` convention; the JSON
+  carries a `run: { interpreter, script }` block that points at it.
+  `run.script` is resolved relative to `tools/`, `run.interpreter`
+  defaults to `bash` (so any `python3` / `node` / etc. is now a
+  one-field change). Missing script → tool is skipped with a `warn`.
+- `run_tool()` rewritten: looks the tool up in the loaded `tools_json`
+  via `jq --arg`, then execs `"$interpreter" "$TOOLS_DIR/$script_path"`.
+  Drops the brittle `${name}.sh` filename glob.
+- `load_tools()` now does `cat` + a tiny `jq` validation (skip if
+  `type != "function"`, name empty, or `run.script` missing). The
+  per-tool description line is derived from the same spec via
+  `.function.parameters.properties`, no parallel schema.
 - **Tool definitions switched from TOML to JSON.** `tools/<name>.toml`
-  → `tools/<name>.json` with identical schema (`name`, `description`,
-  `input.<param>.{type, description, required}`). Eliminates the
-  `toml2json` external dependency and the extra conversion step in
-  `load_tools()` (now reads the JSON file directly). Updated `README.md`
-  and `book.md` accordingly.
-
-## [Unreleased]
+  → `tools/<name>.json`. Eliminates the `toml2json` external dependency
+  and the extra conversion step in `load_tools()`.
 
 ### Added
 - `<think>...</think>` blocks in model replies are surfaced as a dim

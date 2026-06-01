@@ -37,7 +37,7 @@ Type `/help` to see all commands.
 - **Interactive terminal** with readline, history, color
 - **SQLite-backed** conversation memory (`MAX_HISTORY=40`)
 - **Tool calling** (OpenAI function-calling format)
-- **Hot-pluggable tools** �?drop a `<name>.json` + `<name>.sh` into `tools/`
+- **Hot-pluggable tools** �?drop a `<name>.json` (spec) + `<name>.sh` (impl) into `tools/`. The JSON is the full OpenAI tool manifest; the `.sh` is bound via `run.script`
 - **Context injection** via `/read`, `/grep`, `/exec`
 - **Pluggable backend** �?point `BASE_URL` at DeepSeek, OpenAI, Ollama (via proxy), or any compatible service
 
@@ -52,34 +52,44 @@ LICENSE              MIT
 CHANGELOG.md         Version history
 .editorconfig        Editor defaults
 .shellcheckrc        shellcheck config
-tools/               Tool definitions (JSON metadata + Bash implementation)
+tools/               Tool definitions (JSON is the full OpenAI spec; `.sh` bound via `run.script`)
 .data/               Runtime data (SQLite, cache, history) �?gitignored
 .tmp/                Runtime temp files �?gitignored
 ```
 
 For a deep dive read **[book.md](./book.md)**. It walks through every feature,
-the database schema, the ReAct loop, the JSON toolchain, and how to
+the database schema, the ReAct loop, the tool spec format, and how to
 extend with custom tools.
 
 ## Adding a Tool
 
-1. **Define metadata** in `tools/<name>.json`:
+1. **Define the tool** in `tools/<name>.json`. The file is the full OpenAI tool manifest — `ai-agent.sh` reads it as-is with no rewriting. Add a `run` field to bind the implementation:
 
    ```json
    {
-     "name": "list_dir",
-     "description": "List files in a given path",
-     "input": {
-       "path": {
-         "type": "string",
-         "description": "Directory to list",
-         "required": true
+     "type": "function",
+     "function": {
+       "name": "list_dir",
+       "description": "List files in a given path",
+       "parameters": {
+         "type": "object",
+         "properties": {
+           "path": {
+             "type": "string",
+             "description": "Directory to list"
+           }
+         },
+         "required": ["path"]
        }
+     },
+     "run": {
+       "interpreter": "bash",
+       "script": "list_dir.sh"
      }
    }
    ```
 
-2. **Implement** the tool in `tools/<name>.sh`:
+2. **Implement** the tool in `tools/list_dir.sh` (the path is from `run.script`, relative to `tools/`):
 
    ```bash
    #!/usr/bin/env bash
