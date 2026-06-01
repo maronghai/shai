@@ -15,7 +15,6 @@ TOOLS_DESC_CACHE="$DATA_DIR/tools_desc.txt"
 MAX_HISTORY=40
 TEMP_DIR="${WORK_DIR}/.tmp"
 TOOLS_DIR="${WORK_DIR}/tools"
-toml2json() { command toml2json "$@" 2>/dev/null || command toml2json.exe "$@"; }
 LAST_RESPONSE_FILE="${TEMP_DIR}/last-response.txt"
 HISTFILE="$DATA_DIR/.input_history"
 HISTFILESIZE=1000
@@ -147,16 +146,16 @@ load_tools() {
     tool_descriptions=""
 
     if [[ -f "$TOOLS_CACHE" ]] && [[ -f "$TOOLS_DESC_CACHE" ]] \
-        && [[ -z "$(find "$TOOLS_DIR" -maxdepth 1 -name '*.toml' -newer "$TOOLS_CACHE" 2>/dev/null)" ]]; then
+        && [[ -z "$(find "$TOOLS_DIR" -maxdepth 1 -name '*.json' -newer "$TOOLS_CACHE" 2>/dev/null)" ]]; then
         tools_json=$(cat "$TOOLS_CACHE")
         tool_descriptions=$(cat "$TOOLS_DESC_CACHE")
         return
     fi
 
-    local toml json tool_obj desc_line
-    for toml in "$TOOLS_DIR"/*.toml; do
-        [[ -f "$toml" ]] || continue
-        json=$(toml2json "$toml" 2>/dev/null) || continue
+    local def json tool_obj desc_line
+    for def in "$TOOLS_DIR"/*.json; do
+        [[ -f "$def" ]] || continue
+        json=$(cat "$def" 2>/dev/null) || continue
 
         tool_obj=$(echo "$json" | jq -c '
             {

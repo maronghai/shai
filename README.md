@@ -37,7 +37,7 @@ Type `/help` to see all commands.
 - **Interactive terminal** with readline, history, color
 - **SQLite-backed** conversation memory (`MAX_HISTORY=40`)
 - **Tool calling** (OpenAI function-calling format)
-- **Hot-pluggable tools** �?drop a `<name>.toml` + `<name>.sh` into `tools/`
+- **Hot-pluggable tools** �?drop a `<name>.json` + `<name>.sh` into `tools/`
 - **Context injection** via `/read`, `/grep`, `/exec`
 - **Pluggable backend** �?point `BASE_URL` at DeepSeek, OpenAI, Ollama (via proxy), or any compatible service
 
@@ -52,27 +52,31 @@ LICENSE              MIT
 CHANGELOG.md         Version history
 .editorconfig        Editor defaults
 .shellcheckrc        shellcheck config
-tools/               Tool definitions (TOML metadata + Bash implementation)
+tools/               Tool definitions (JSON metadata + Bash implementation)
 .data/               Runtime data (SQLite, cache, history) �?gitignored
 .tmp/                Runtime temp files �?gitignored
 ```
 
 For a deep dive read **[book.md](./book.md)**. It walks through every feature,
-the database schema, the ReAct loop, the JSON / TOML toolchain, and how to
+the database schema, the ReAct loop, the JSON toolchain, and how to
 extend with custom tools.
 
 ## Adding a Tool
 
-1. **Define metadata** in `tools/<name>.toml`:
+1. **Define metadata** in `tools/<name>.json`:
 
-   ```toml
-   name = "list_dir"
-   description = "List files in a given path"
-
-   [input.path]
-   type = "string"
-   description = "Directory to list"
-   required = true
+   ```json
+   {
+     "name": "list_dir",
+     "description": "List files in a given path",
+     "input": {
+       "path": {
+         "type": "string",
+         "description": "Directory to list",
+         "required": true
+       }
+     }
+   }
    ```
 
 2. **Implement** the tool in `tools/<name>.sh`:
@@ -105,7 +109,6 @@ No changes to the main script are required.
 | `curl` | API calls | preinstalled |
 | `jq` | JSON reads & transforms | `brew install jq` / `apt install jq` |
 | `jj` | JSON writes (`set`/`push`) | `brew install tidwall/tap/jj` |
-| `toml2json` | Tool config conversion | `brew install toml2json` / `go install github.com/jeremyckahn/toml2json@latest` |
 
 ## Security Notice
 

@@ -1,0 +1,16 @@
+{
+  "name": "grep_search",
+  "description": "Search for a regex pattern in the codebase files",
+  "input": {
+    "pattern": {
+      "type": "string",
+      "description": "Regex pattern to search for",
+      "required": true
+    },
+    "path": {
+      "type": "string",
+      "description": "Directory to search in (default: current directory)",
+      "required": false
+    }
+  }
+}

@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **Tool definitions switched from TOML to JSON.** `tools/<name>.toml`
+  → `tools/<name>.json` with identical schema (`name`, `description`,
+  `input.<param>.{type, description, required}`). Eliminates the
+  `toml2json` external dependency and the extra conversion step in
+  `load_tools()` (now reads the JSON file directly). Updated `README.md`
+  and `book.md` accordingly.
+
 ## [Unreleased]
 
 ### Added

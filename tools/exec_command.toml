@@ -1,7 +1,0 @@
-name = "exec_command"
-description = "Execute a shell command and return its stdout/stderr output"
-
-[input.command]
-type = "string"
-description = "Shell command to execute"
-required = true
