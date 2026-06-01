@@ -3,13 +3,11 @@ set -euo pipefail
 
 DEEPSEEK_AI_AGENT_VERSION="1.0.0"
 
-API_KEY="${API_KEY:-$(curl -sS --connect-timeout 2 win/ds 2>/dev/null || echo "")}"
+API_KEY="${API_KEY:-$(curl -sS win/ds 2>/dev/null || echo "")}"
 MODEL="${MODEL:-deepseek-v4-flash}"
 API_URL="https://api.deepseek.com/chat/completions"
 API_URL="${API_URL:-http://win:8080/chat/completions}"
-
-WORK_DIR="$(dirname $0)"
-DATA_DIR="${WORK_DIR}/.data"
+DATA_DIR=".data"
 DB_PATH="$DATA_DIR/chat.db"
 TOOLS_FILE="$DATA_DIR/tools.json"
 MAX_HISTORY=40
@@ -26,7 +24,7 @@ trap 'history -w 2>/dev/null || true' EXIT INT
 
 command -v sqlite3 >/dev/null 2>&1 || { echo "Error: sqlite3 is required" >&2; exit 1; }
 
-SYSTEM_PROMPT="$(cat ${WORK_DIR}/SYSTEM_PROMPT.md)"
+SYSTEM_PROMPT="$(cat SYSTEM_PROMPT.md)"
 
 init_db() {
     if sqlite3 "$DB_PATH" "SELECT sql FROM sqlite_master WHERE type='table' AND name='messages' AND sql NOT LIKE '%tool_calls%'" 2>/dev/null | grep -q .; then
@@ -46,23 +44,6 @@ init_db() {
 }
 
 sql() { echo "$1" | sqlite3 "$DB_PATH" || true; }
-
-# Properly escape a value for SQL single-quoted string:
-#   Replace ' with '' (SQL escaping), wrap in single quotes
-sqlq() {
-    local s="$1"
-    s="${s//\'/''}"
-    echo "'$s'"
-}
-
-# Properly escape a value for use in a SQL single-quoted string:
-#   Replace each ' with ''' (SQL escaping), wrap result in single quotes
-#   Empty string becomes '' (empty single-quoted string)
-sqlq() {
-    local s="$1"
-    s="${s///}"
-    echo "$s"
-}
 
 add_message() {
     local role="$1" content="$2" input="${3:-}"
@@ -315,6 +296,19 @@ cleanup_orphan_tc() {
 init_db
 cleanup_orphan_tc
 prune_history
+
+dbg=$(sqlite3 -json "$DB_PATH" "SELECT id, role, substr(content,1,40) as content, tool_call_id FROM messages ORDER BY id" 2>/dev/null || echo "[]")
+if [[ "$dbg" != "[]" ]]; then
+    roles="" j=0
+    while true; do
+        r=$(echo "$dbg" | jj get ".${j}.role" --raw 2>/dev/null || echo "") && [[ -z "$r" ]] && break
+        tid=$(echo "$dbg" | jj get ".${j}.tool_call_id" --raw 2>/dev/null || echo "")
+        roles="$roles $r${tid:+($tid)}"
+        j=$((j+1))
+    done
+    echo -e "${Y}[dbg]$roles${R}"
+fi
+
 load_history
 load_tools
 
