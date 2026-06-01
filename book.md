@@ -31,7 +31,7 @@ ai-agent.sh 是一个基于 Bash 脚本的 AI Agent 终端程序，它：
 | 工具调用 | 模型可自主调用 `read_file`、`grep_search`、`exec_command` |
 | 上下文注入 | 通过 `/read`、`/grep`、`/exec` 将信息注入对话 |
 | 响应保存 | 将 AI 回复保存到文件 |
-| 极简依赖 | 只需 `bash`、`sqlite3`、`curl`、`jj` |
+| 极简依赖 | 只需 `bash`、`sqlite3`、`curl`、`jq`、`jj` |
 
 ### 1.3 架构一览
 
@@ -74,8 +74,14 @@ ai-agent.sh 是一个基于 Bash 脚本的 AI Agent 终端程序，它：
 bash --version       # Bash 4.0+
 sqlite3 --version    # SQLite 3.x
 curl --version       # curl
-jj --version         # JSON 处理器 (https://github.com/tidwall/jj)
+jq --version         # JSON 查询与变换 (https://jqlang.org)
+jj --version         # JSON 写入工具 (https://github.com/tidwall/jj)
 ```
+
+> **为什么同时需要 `jq` 和 `jj`？**
+> - `jj` 的 `set` / `push` / `del` 等写操作语法极简
+> - `jq` 的查询与变换能力（`keys`、`has`、`length`、`map`、`select`、null 默认值）远超 `jj`
+> - 本项目采用 **写用 `jj`、读用 `jq`** 的混合策略
 
 如果缺少 `jj`，安装方式：
 
@@ -86,6 +92,19 @@ brew install tidwall/tap/jj
 # Linux (下载二进制)
 curl -L https://github.com/tidwall/jj/releases/latest/download/jj-0.7.5-linux-amd64 -o /usr/local/bin/jj
 chmod +x /usr/local/bin/jj
+```
+
+如果缺少 `jq`：
+
+```bash
+# macOS
+brew install jq
+
+# Debian/Ubuntu
+sudo apt install jq
+
+# Windows (chocolatey)
+choco install jq
 ```
 
 ### 2.2 获取脚本
@@ -324,7 +343,7 @@ drwxr-xr-x  3 user  staff    96  3月 15 09:55 ..
 2. save_assistant_tool_call() 保存 AI 消息
 3. 遍历 tool_calls 数组
 4. 对每个工具调用 handle_tool_call()
-   ├─ 解析工具名称、参数、ID
+   ├─ 解析工具名称、参数、ID（用 jq）
    ├─ 执行对应操作
    └─ save_tool_result() 保存结果
 5. prune_history() 修剪历史
@@ -540,18 +559,18 @@ response_content=$(curl -sS \
 
 ### 7.5 JSON 处理
 
-脚本使用 `jj`（tidwall/jj）处理 JSON——它是一个极简的 JSON 命令行工具，比 `jq` 更轻量：
+脚本采用 **写用 `jj`、读用 `jq`** 的混合策略——`jq` 负责查询与变换，`jj` 负责写入与数组追加。
 
 ```bash
 # 获取字段
-jj get choices.0.message.content --raw <<< "$response"
+jq -r '.choices[0].message.content // empty' <<< "$response"
 
 # 设置字段
 jj set model "deepseek-v4" messages "$msgs"
 
 # 遍历数组
 for ((i=0; ; i++)); do
-    tc=$(echo "$tc_array" | jj get ".$i" 2>/dev/null || echo "")
+    tc=$(echo "$tc_array" | jq -c ".[$i] // empty" 2>/dev/null)
     [[ -z "$tc" ]] && break
     ...
 done
@@ -597,7 +616,7 @@ case "$name" in
     grep_search) ... ;;
     exec_command) ... ;;
     list_dir)
-        local path=$(echo "$args" | jj get path --raw 2>/dev/null || echo ".")
+        local path=$(echo "$args" | jq -r '.path // "."' 2>/dev/null)
         result=$(ls -la "$path")
         ;;
 esac
@@ -673,6 +692,8 @@ sudo yum install sqlite
 ```
 
 ### 9.2 "jj: command not found"
+
+（注：v0.0.3+ 还需 `jq`。安装见 2.1 节。）
 
 **问题：** JSON 处理器缺失。
 
@@ -914,7 +935,7 @@ ai-agent/
 
 ai-agent.sh 是一个优雅的工程范例——用不到 400 行 Bash 脚本，实现了 AI Agent 的核心功能。它证明了：
 
-1. **简单工具也能做出强大的东西** —— Bash + curl + sqlite3 + jj，四个小工具的组合
+1. **简单工具也能做出强大的东西** —— Bash + curl + sqlite3 + jq + jj，四个小工具的组合
 2. **Tool Calling 是 AI 落地的关键** —— 让 AI 不仅能说，还能做
 3. **透明即安全** —— 394 行代码，每一行都可审查、可理解、可修改
 

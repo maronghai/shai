@@ -1,9 +1,12 @@
-# Zig 构建产物
+# ---------------------------------------------------------------------------
+# Build artifacts
+# Zig 目录条目为历史遗留；项目目前是纯 Bash，保留以备改名后复用
+# ---------------------------------------------------------------------------
 .zig-cache/
 .zigmod/
 zig-out/
 
-# 编译中间产物
+# Compiled objects / shared libs
 *.dll
 *.dylib
 *.exe
@@ -13,39 +16,66 @@ zig-out/
 *.obj
 *.pdb
 *.so
-*.d
 
-# 模型与数据文件
-*.bin
-*.ckpt
-*.gguf
-*.pth
-*.safetensors
-models/
+# ---------------------------------------------------------------------------
+# Runtime data (created by ai-agent.sh)
+# ---------------------------------------------------------------------------
+.data/
+.tmp/
+.last-response.txt
 
-# IDE/编辑器配置
+# ---------------------------------------------------------------------------
+# Tool / IDE state
+# ---------------------------------------------------------------------------
 .idea/
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json
+# opencode metadata + sqlite db
+.codegraph/
+# Claude Code state
+.claude/
+
+# ---------------------------------------------------------------------------
+# Editor backups / merge artifacts
+# ---------------------------------------------------------------------------
+*.bak
+*.orig
+*.rej
 *.swo
 *.swp
 *~
+*#
+.#*
 
-# CodeArts 平台配置
-.arts/
-.codeartsdoer/
-
-# OS 临时文件
-.$RECYCLE.BIN/
-.AppleDouble
+# ---------------------------------------------------------------------------
+# OS cruft
+# ---------------------------------------------------------------------------
 .DS_Store
+.AppleDouble
 ._*
 .directory
 Desktop.ini
 ehthumbs.db
 Thumbs.db
+$RECYCLE.BIN/
 
-.tmp
-.data
+# ---------------------------------------------------------------------------
+# Misc safety nets
+# ---------------------------------------------------------------------------
+# any stray test/agent logs
+*.log
+# generic temp files
+*.tmp
+# ad-hoc test scripts at repo root
+tmp_*.sh
+# secrets at root
+.env
+.env.*
+*.sqlite
+*.sqlite3
 .claude
+.codegraph
+.editorconfig
+.shellcheckrc
+.gitattributes
