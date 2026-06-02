@@ -20,7 +20,7 @@ HISTFILE="$DATA_DIR/.input_history"
 HISTFILESIZE=1000
 HISTSIZE=1000
 
-R='\033[0m'; B='\033[1;34m'; G='\033[1;32m'; Y='\033[1;33m'; C='\033[1;36m'; M='\033[1;35m'; D='\033[2m'
+R='\033[0m'; B='\033[1;34m'; G='\033[1;32m'; Y='\033[1;33m'; C='\033[1;36m'; M='\033[1;35m'; D='\033[2m'; DM='\033[90m'
 
 mkdir -p "$DATA_DIR" "$TEMP_DIR"
 
@@ -32,51 +32,87 @@ command -v sqlite3 >/dev/null 2>&1 || { echo "Error: sqlite3 is required" >&2; e
 SYSTEM_PROMPT="$(cat ${WORK_DIR}/SYSTEM_PROMPT.md)"
 
 init_db() {
-    if sqlite3 "$DB_PATH" "SELECT sql FROM sqlite_master WHERE type='table' AND name='messages' AND sql NOT LIKE '%tool_calls%'" 2>/dev/null | grep -q .; then
-        sqlite3 "$DB_PATH" "DROP TABLE messages" || true
+    if ! sqlite3 -cmd 'PRAGMA foreign_keys=ON' "$DB_PATH" \
+        "SELECT 1 FROM pragma_table_info('messages') WHERE name='thinking'" 2>/dev/null | grep -q 1; then
+        sqlite3 "$DB_PATH" "DROP TABLE IF EXISTS messages; DROP TABLE IF EXISTS tool_calls;" || true
     fi
-    sqlite3 "$DB_PATH" "
+    sqlite3 -cmd 'PRAGMA foreign_keys=ON' "$DB_PATH" <<'SQL' || true
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            role TEXT NOT NULL,
+            role TEXT NOT NULL CHECK (role IN ('system','user','assistant')),
             content TEXT,
-            user_input TEXT,
-            tool_calls TEXT,
-            tool_call_id TEXT,
+            raw_input TEXT,
+            thinking TEXT,
             created_at TEXT DEFAULT (datetime('now'))
         );
-    " || true
+        CREATE TABLE IF NOT EXISTS tool_calls (
+            id TEXT PRIMARY KEY,
+            message_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            arguments TEXT NOT NULL,
+            result TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_tool_calls_message ON tool_calls(message_id);
+SQL
 }
 
-sql() { echo "$1" | sqlite3 "$DB_PATH" || true; }
+sql() { sqlite3 -cmd 'PRAGMA foreign_keys=ON' "$DB_PATH" <<< "$1" || true; }
+db_quote() {
+    local q s
+    q="''"
+    s="${1//\'/$q}"
+    printf "'%s'" "$s"
+}
+db_exec_returning() {
+    sqlite3 -cmd 'PRAGMA foreign_keys=ON' "$DB_PATH" \
+        "INSERT INTO messages (role, content) VALUES ('assistant', $(db_quote "$1")); SELECT last_insert_rowid();" 2>/dev/null | tail -1
+}
 
 add_message() {
-    local role="$1" content="$2" input="${3:-}"
-    content="${content//\'/''}"
-    if [[ -n "$input" ]]; then
-        input="${input//\'/''}"
-        sql "INSERT INTO messages (role, content, user_input) VALUES ('$role', '$content', '$input')"
-    else
-        sql "INSERT INTO messages (role, content) VALUES ('$role', '$content')"
+    local role="$1" content="$2" raw="${3:-}" thinking="${4:-}"
+    local columns="(role, content" values="($(db_quote "$role"), $(db_quote "$content")"
+    if [[ -n "$raw" ]]; then
+        columns+=", raw_input"
+        values+=", $(db_quote "$raw")"
     fi
+    if [[ -n "$thinking" ]]; then
+        columns+=", thinking"
+        values+=", $(db_quote "$thinking")"
+    fi
+    columns+=")"
+    values+=")"
+    sql "INSERT INTO messages $columns VALUES $values"
 }
 
 save_assistant_tool_call() {
-    local content="${1:-}" tool_calls="$2"
-    content="${content//\'/''}"
-    local tc="${tool_calls//\'/''}"
-    if [[ -n "$content" ]]; then
-        sql "INSERT INTO messages (role, content, tool_calls) VALUES ('assistant', '$content', '$tc')"
-    else
-        sql "INSERT INTO messages (role, tool_calls) VALUES ('assistant', '$tc')"
+    local content="${1:-}" tc_array="$2" thinking="${3:-}"
+    local mid
+    mid=$(db_exec_returning "$content")
+    if [[ -z "$mid" || "$mid" == "0" ]]; then
+        warn "save_assistant_tool_call: failed to insert assistant message"
+        return 1
     fi
+    if [[ -n "$thinking" ]]; then
+        sql "UPDATE messages SET thinking=$(db_quote "$thinking") WHERE id=$mid"
+    fi
+
+    local i=0 tc tcid name args
+    while true; do
+        tc=$(jq -c --argjson i "$i" '.[$i] // empty' <<< "$tc_array" 2>/dev/null) || break
+        [[ -z "$tc" || "$tc" == "null" ]] && break
+        tcid=$(jq -r '.id // ""' <<< "$tc")
+        name=$(jq -r '.function.name // ""' <<< "$tc")
+        args=$(jq -r '.function.arguments // "{}"' <<< "$tc")
+        sql "INSERT INTO tool_calls (id, message_id, name, arguments) VALUES ($(db_quote "$tcid"), $mid, $(db_quote "$name"), $(db_quote "$args"))"
+        i=$((i+1))
+    done
 }
 
 save_tool_result() {
-    local tool_call_id="$1" content="$2"
-    local cid="${tool_call_id//\'/''}"
-    content="${content//\'/''}"
-    sql "INSERT INTO messages (role, content, tool_call_id) VALUES ('tool', '$content', '$cid')"
+    local call_id="$1" result="$2"
+    sql "UPDATE tool_calls SET result=$(db_quote "$result") WHERE id=$(db_quote "$call_id")"
 }
 
 run_tool() {
@@ -124,38 +160,62 @@ warn() { log "$Y" "$@"; }
 history_messages='[]'
 load_history() {
     history_messages=$(sqlite3 "$DB_PATH" "
-        SELECT json_group_array(
-            json_patch(
-                json_object('role', role, 'content', COALESCE(content, '')),
-                CASE
-                    WHEN tool_calls IS NOT NULL THEN json_object('tool_calls', json(tool_calls))
-                    WHEN tool_call_id IS NOT NULL THEN json_object('tool_call_id', tool_call_id)
-                    ELSE '{}'
-                END
+        SELECT json_group_array(json(payload)) FROM (
+            WITH stream AS (
+                SELECT m.id AS msg_id, 0 AS ord,
+                       CASE
+                           WHEN m.role IN ('system','user') THEN
+                               json_object('role', m.role, 'content', COALESCE(m.content, ''))
+                           WHEN m.role = 'assistant' AND EXISTS (SELECT 1 FROM tool_calls WHERE message_id = m.id) THEN
+                               json_object(
+                                   'role', 'assistant',
+                                   'content', COALESCE(m.content, ''),
+                                   'tool_calls', (
+                                       SELECT json_group_array(json_object(
+                                           'id', tc.id,
+                                           'type', 'function',
+                                           'function', json_object('name', tc.name, 'arguments', tc.arguments)
+                                       ))
+                                       FROM tool_calls tc WHERE tc.message_id = m.id ORDER BY tc.rowid
+                                   )
+                               )
+                           WHEN m.role = 'assistant' THEN
+                               json_object('role', 'assistant', 'content', COALESCE(m.content, ''))
+                       END AS payload
+                FROM messages m
+                UNION ALL
+                SELECT tc.message_id, tc.rowid,
+                       json_object('role', 'tool', 'content', COALESCE(tc.result, ''), 'tool_call_id', tc.id)
+                FROM tool_calls tc
+                INNER JOIN messages m2 ON m2.id = tc.message_id
             )
+            SELECT payload FROM stream ORDER BY msg_id, ord
         )
-        FROM (SELECT role, content, tool_calls, tool_call_id FROM messages ORDER BY id)
     " 2>/dev/null || echo "[]")
 }
 prune_history() {
     local count
-    count=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM messages" 2>/dev/null || echo 0)
+    count=$(sqlite3 -cmd 'PRAGMA foreign_keys=ON' "$DB_PATH" "SELECT COUNT(*) FROM messages" 2>/dev/null || echo 0)
     if [[ $count -gt $MAX_HISTORY ]]; then
         local remove=$((count - MAX_HISTORY))
-        sqlite3 "$DB_PATH" "DELETE FROM messages WHERE id IN (SELECT id FROM messages ORDER BY id LIMIT $remove)" || true
+        sqlite3 -cmd 'PRAGMA foreign_keys=ON' "$DB_PATH" \
+            "DELETE FROM messages WHERE id IN (SELECT id FROM messages ORDER BY id LIMIT $remove)" || true
     fi
 }
 
 tools_json=""
+tools_wire_json="[]"
 tool_descriptions=""
 load_tools() {
     tools_json="[]"
+    tools_wire_json="[]"
     tool_descriptions=""
 
     if [[ -f "$TOOLS_CACHE" ]] && [[ -f "$TOOLS_DESC_CACHE" ]] \
         && [[ -z "$(find "$TOOLS_DIR" -maxdepth 1 -name '*.json' -newer "$TOOLS_CACHE" 2>/dev/null)" ]]; then
         tools_json=$(cat "$TOOLS_CACHE")
         tool_descriptions=$(cat "$TOOLS_DESC_CACHE")
+        tools_wire_json=$(echo "$tools_json" | jq -c 'map(del(.run))' 2>/dev/null)
         return
     fi
 
@@ -184,6 +244,8 @@ load_tools() {
         tools_json=$(echo "$tools_json" | jj push . "$tool_obj" 2>/dev/null) || continue
         tool_descriptions+="$desc_line"$'\n'
     done
+
+    tools_wire_json=$(echo "$tools_json" | jq -c 'map(del(.run))' 2>/dev/null)
 
     echo "$tools_json" > "$TOOLS_CACHE"
     printf '%s' "$tool_descriptions" > "$TOOLS_DESC_CACHE"
@@ -273,69 +335,7 @@ process_input() {
     fi
 }
 
-cleanup_orphan_tc() {
-    # Fast SQL-level cleanup using json_each
-    if sqlite3 "$DB_PATH" "
-        DELETE FROM messages WHERE id IN (
-            SELECT a.id FROM messages a
-            WHERE a.role='assistant' AND a.tool_calls IS NOT NULL
-            AND (
-                SELECT COUNT(*) FROM json_each(a.tool_calls) AS tc
-                WHERE EXISTS (
-                    SELECT 1 FROM messages t
-                    WHERE t.role='tool' AND t.tool_call_id = json_extract(tc.value, '\$.id')
-                )
-            ) < (
-                SELECT COUNT(*) FROM json_each(a.tool_calls)
-            )
-        );
-        DELETE FROM messages WHERE role='tool' AND tool_call_id NOT IN (
-            SELECT DISTINCT json_extract(value, '\$.id')
-            FROM messages, json_each(tool_calls)
-            WHERE role='assistant' AND tool_calls IS NOT NULL
-        );
-    " 2>/dev/null; then
-        return 0
-    fi
-
-    # Fallback bash-level cleanup (for SQLite without json_each)
-    local raw i=0
-    raw=$(sqlite3 -json "$DB_PATH" "SELECT id, tool_calls FROM messages WHERE role='assistant' AND tool_calls IS NOT NULL" 2>/dev/null || echo "[]")
-    [[ "$raw" != "[]" ]] && while true; do
-        local aid tc
-        aid=$(echo "$raw" | jq -r ".[$i].id // empty" 2>/dev/null) && [[ -z "$aid" ]] && break
-        tc=$(echo "$raw" | jq -c ".[$i].tool_calls // empty" 2>/dev/null)
-        [[ -z "$tc" ]] && { i=$((i+1)); continue; }
-        local j=0 missing=0
-        while true; do
-            local tcid
-            tcid=$(echo "$tc" | jq -r ".[$j].id // empty" 2>/dev/null) && [[ -z "$tcid" ]] && break
-            local found
-            found=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM messages WHERE role='tool' AND tool_call_id='${tcid//\'/''}'" 2>/dev/null || echo 0)
-            [[ "$found" == "0" ]] && missing=1
-            j=$((j+1))
-        done
-        if (( missing )); then sql "DELETE FROM messages WHERE id=$aid"; fi
-        i=$((i+1))
-    done
-
-    raw=$(sqlite3 -json "$DB_PATH" "SELECT id, tool_call_id FROM messages WHERE role='tool'" 2>/dev/null || echo "[]")
-    if [[ "$raw" != "[]" ]]; then
-        i=0
-        while true; do
-            local tid tcid
-            tid=$(echo "$raw" | jq -r ".[$i].id // empty" 2>/dev/null) && [[ -z "$tid" ]] && break
-            tcid=$(echo "$raw" | jq -r ".[$i].tool_call_id // empty" 2>/dev/null)
-            local found
-            found=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM messages WHERE role='assistant' AND tool_calls IS NOT NULL AND instr(tool_calls, '\"id\":\"$tcid\"') > 0" 2>/dev/null || echo 0)
-            if [[ "$found" == "0" ]]; then sql "DELETE FROM messages WHERE id=$tid"; fi
-            i=$((i+1))
-        done
-    fi
-}
-
 init_db
-cleanup_orphan_tc
 prune_history
 load_history
 load_tools
@@ -358,12 +358,16 @@ while true; do
         /help) help; continue ;;
         /clear)
             history_messages="[]"
-            sqlite3 "$DB_PATH" "DELETE FROM messages" || true
+            sql "DELETE FROM messages"
             info "History cleared."
             continue
             ;;
         /hist)
-            sqlite3 -header -column "$DB_PATH" "SELECT id, role, substr(content,1,60) as content, user_input, created_at FROM messages ORDER BY id" 2>/dev/null || echo "No messages"
+            echo "== messages =="
+            sqlite3 -header -column "$DB_PATH" "SELECT id, role, substr(COALESCE(content,'<null>'),1,60) as content, COALESCE(raw_input,'') as raw_input, CASE WHEN thinking IS NULL THEN '' ELSE length(thinking) || ' chars' END as thinking FROM messages ORDER BY id" 2>/dev/null || echo "No messages"
+            echo
+            echo "== tool_calls =="
+            sqlite3 -header -column "$DB_PATH" "SELECT id, message_id, name, substr(COALESCE(arguments,'{}'),1,40) as arguments, length(COALESCE(result,'')) as result_len FROM tool_calls ORDER BY message_id, rowid" 2>/dev/null || echo "No tool calls"
             continue
             ;;
         /tools*)
@@ -405,8 +409,8 @@ while true; do
     _inner=1
     while (( _inner )); do
         post_data=$(jj set model "$MODEL" messages "$msgs_json")
-        if [[ -n "$tools_json" && "$tools_json" != "[]" ]]; then
-            post_data=$(echo "$post_data" | jj set tools "$tools_json")
+        if [[ -n "$tools_wire_json" && "$tools_wire_json" != "[]" ]]; then
+            post_data=$(echo "$post_data" | jj set tools "$tools_wire_json")
         fi
         #-H "Authorization: Bearer $API_KEY" 
         response_content=$(curl -sS --connect-timeout 15 --max-time 120 "$API_URL" --json "$post_data") || {
@@ -428,7 +432,18 @@ while true; do
             asst_content=$(jq -r '.content // empty' <<< "$asst_msg" 2>/dev/null)
             tc_array=$(jq -c '.tool_calls // []' <<< "$asst_msg" 2>/dev/null)
 
-            save_assistant_tool_call "$asst_content" "$tc_array"
+            asst_thinking=""
+            if [[ "$asst_content" == *"<think>"* && "$asst_content" == *"</think>"* ]]; then
+                if [[ "$asst_content" =~ \<think\>(.+)\</think\> ]]; then
+                    asst_thinking="${BASH_REMATCH[1]}"
+                    asst_content="${asst_content//"<think>${asst_thinking}</think>"/}"
+                    asst_content="${asst_content#"${asst_content%%[![:space:]]*}"}"
+                fi
+            fi
+            echo -e "${C}think:${R} ${DM}${asst_thinking:-(no reasoning)}${R}"
+            echo
+
+            save_assistant_tool_call "$asst_content" "$tc_array" "$asst_thinking"
 
             for ((_i=0; ; _i++)); do
                 tc=$(jq -c ".[$_i] // empty" <<< "$tc_array" 2>/dev/null)
@@ -461,16 +476,14 @@ while true; do
                 response_text="${response_text#"${response_text%%[![:space:]]*}"}"
             fi
         fi
-        if [[ -n "$think_text" ]]; then
-            echo -e "${D}think: ${think_text}${R}"
-            echo
-        fi
+        echo -e "${C}think:${R} ${DM}${think_text:-(no reasoning)}${R}"
+        echo
         echo -e "$response_text"
 
         if (( ! _usr_stored )); then
             add_message "user" "$user_content" "$input"
         fi
-        add_message "assistant" "$response_text"
+        add_message "assistant" "$response_text" "" "$think_text"
         _inner=0
     done
 

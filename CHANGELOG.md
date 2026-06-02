@@ -6,7 +6,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **`messages.thinking` column** (TEXT, nullable) for storing `<think>...</think>`
+  blocks from reasoning models (DeepSeek R1, etc.). The thinking is shown
+  to the user locally (dim "think: …" line above the answer, as before) and
+  persisted in the DB for `/hist` inspection — but is **never loaded back
+  into the conversation history** (`load_history` doesn't select it). This
+  saves tokens on subsequent turns (the model doesn't re-read its own past
+  reasoning) while keeping the trace locally.
+  - `add_message` takes a 4th `thinking` arg; `save_assistant_tool_call`
+    takes a 3rd `thinking` arg.
+  - Thinking is extracted from both the final-response path and the
+    tool-call path (when an assistant message has reasoning before
+    calling tools).
+  - `/hist` now shows the `thinking` length per row.
+  - `init_db` migrates: detects missing `thinking` column on `messages`
+    and drops both tables, recreating with the new schema.
+- `<think>...</think>` blocks in model replies are surfaced as a
+  `think: <content>` line above the answer (e.g. DeepSeek R1, reasoning models).
+  The label is **bold cyan** (`\033[1;36m`), the content is **gray**
+  (`\033[90m` = `DM` in the color table) — uses the ANSI "bright black"
+  slot which renders as a light-medium gray on every terminal, clearly
+  readable on a black background but visually subordinate to the default
+  white body text. Body text stays in the default terminal color for
+  max readability. Stripped from the saved message so the conversation log
+  stays clean.
+  - **Shown in BOTH paths:** final-response (`finish_reason == "stop"`)
+    and tool-call (`finish_reason == "tool_calls"`). Previously the
+    tool-call path only saved the think to the DB and never echoed it
+    to the terminal, so users never saw the model's reasoning when it
+    decided to invoke a tool.
+  - **Always shown, with placeholder when empty.** The reasoning model
+    in use (`MiniMax-M3`) inconsistently emits `<think>...</think>`
+    blocks — same prompt sometimes gets reasoning, sometimes plain text.
+    The script now always prints a `think:` line, defaulting to
+    `(no reasoning)` when the model skipped the think block. The DB
+    still only stores real thinking (NULL when absent) so `/hist`
+    stays honest about which turns actually had reasoning.
+
+### Fixed
+- **`load_history` leaked orphan `tool_calls` into the request,**
+  causing API errors like
+  `tool result's tool id(call_function_xxx) not found (2013)`.
+  The CTE's second branch was `SELECT ... FROM tool_calls tc` with
+  no JOIN or WHERE, so rows referencing deleted `messages` (orphans
+  left over from earlier FK=OFF operations) were still emitted as
+  `role:'tool'` messages with a `tool_call_id` the model never
+  requested. Fixed by adding `INNER JOIN messages m2 ON m2.id = tc.message_id`,
+  which filters orphans at read time. The `messages` side already
+  used `m.id` directly, so no change needed there.
+- **`/clear` left orphan rows in `tool_calls`.** The handler called
+  `sqlite3 "$DB_PATH" "DELETE FROM messages"` directly, which opens
+  a fresh connection without `PRAGMA foreign_keys=ON`, so
+  `ON DELETE CASCADE` on `tool_calls.message_id` never fired.
+  Switched to the `sql` helper, which sets the pragma.
+- **`db_quote` was silently corrupting single quotes in stored content.**
+  The original pattern `${var//\'/''}` is parsed by bash in a way that
+  the `''` replacement is treated as an empty string (or worse, eats
+  adjacent chars), so an input like `it's a test` became `its a test`
+  on the way into SQLite. Every call to `add_message`, `save_tool_result`,
+  etc. was affected. Fixed by using an intermediate variable for the
+  replacement: `q="''"; s="${1//\'/$q}"`. The new pattern is also robust
+  to `set -u` (declarations must be split across statements, not combined
+  in one `local`).
+
 ### Changed
+- **SQLite schema refactored: 1 polymorphic table → 2 normalized tables.**
+  The old `messages` table overloaded `role='user'/'assistant'/'tool'` with
+  mutually exclusive fields (`content`, `user_input`, `tool_calls`,
+  `tool_call_id`) and used string-grepping (`instr(tool_calls, '"id":"…"')`)
+  to link tool results back to their calls. New schema:
+  - `messages(id, role, content, raw_input, created_at)` with
+    `CHECK (role IN ('system','user','assistant'))` — the `tool` role is
+    dropped, those messages are derived from `tool_calls` at read time.
+  - `tool_calls(id, message_id, name, arguments, result, created_at)` with
+    `FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE`
+    and an index on `message_id`.
+  - Tool results live in `tool_calls.result` (denormalized with the call);
+    a single CTE-based `load_history` query joins both tables and
+    synthesizes the `role:'tool'` messages in correct order.
+  - `cleanup_orphan_tc()` (60+ lines of SQL + bash fallback) is **deleted**;
+    `ON DELETE CASCADE` makes orphan tool calls impossible by construction.
+  - `prune_history()` is now safe mid-conversation: deleting the oldest N
+    `messages` rows auto-drops their `tool_calls` and results via CASCADE.
+  - All write helpers go through a new `db_quote` helper (consistent
+    SQL string escaping, replaces scattered `${var//\'/''}` blocks).
+  - The `sql` helper and `init_db` / `prune_history` set
+    `PRAGMA foreign_keys=ON` per connection (required for cascade).
+  - `/hist` now shows both tables (messages + tool_calls) for full
+    visibility.
 - **Tool spec is now the full OpenAI manifest, no rewrite.** Each
   `tools/<name>.json` file is the complete `{"type":"function", "function":{...}}`
   object the API expects — `ai-agent.sh` reads it verbatim instead of
@@ -31,11 +119,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Tool definitions switched from TOML to JSON.** `tools/<name>.toml`
   → `tools/<name>.json`. Eliminates the `toml2json` external dependency
   and the extra conversion step in `load_tools()`.
-
-### Added
-- `<think>...</think>` blocks in model replies are surfaced as a dim
-  `think: <content>` line above the answer (e.g. DeepSeek R1, reasoning models).
-  Stripped from the saved message so the conversation log stays clean.
 
 ## [0.0.3] - 2026-06-02
 
