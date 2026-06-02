@@ -1154,7 +1154,23 @@ You> /hist full 114     # 单条（_hist_full 风格）：id=114 的 `--- #id ro
 
 回答清楚这三个问题，新 agent 接入通常 5 分钟内能完成。
 
----
+### 13.11 REPL 提示符与误操作防护
+
+主循环的 `read -e -p` 不再写死 `\e[1;32mYou>\e[0m`，而是用 `_agent_prompt`
+函数渲染当前 agent 状态：
+
+| 当前 agent | 提示符 | 颜色含义 |
+|---|---|---|
+| default | `You [default]>` | 绿色 — 默认上下文 |
+| code-reviewer | `You [code-reviewer · read-only]>` | 黄色 — 专用 persona |
+| coordinator | `You [coordinator · orchestration, planning, delegation]>` | 黄色 — 专用 persona |
+
+`description` 超过 30 字符会被截断并加 `…`，所以 prompt 不会撑爆屏幕。
+颜色切换（绿→黄）就是"你在一个非默认上下文里"的视觉信号；用户忘记
+`/agent` 切回去时一眼就能看到。
+
+`_agent_prompt` 在每次 `read` 时调用，所以 `/agent` 切换后下一条命令的
+提示符立即变色，不需要重启 REPL。---
 
 ## 附录
 

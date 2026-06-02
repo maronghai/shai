@@ -587,6 +587,33 @@ agent_status() {
     printf 'db=%s msgs=%s tools=%s\n' "$DB_PATH" "$msgs_n" "$tools_n"
 }
 
+# Build the REPL prompt. Format:
+#   You [default]>                     (green; default agent)
+#   You [code-reviewer · read-only]>   (yellow; named agent, desc truncated to 30 chars)
+# Non-default agents get yellow so the user notices they're in a specialized context.
+_agent_prompt() {
+    local label color f desc hint=""
+    if [[ -n "$CURRENT_AGENT" ]]; then
+        label="$CURRENT_AGENT"
+        color="$Y"
+        f="$AGENTS_DIR/$CURRENT_AGENT/system.md"
+        if [[ -f "$f" ]]; then
+            desc=$(agent_description "$f" 2>/dev/null)
+            if [[ -n "$desc" && "$desc" != "(no description)" ]]; then
+                if [[ ${#desc} -gt 30 ]]; then
+                    hint=" ${D}· ${desc:0:30}…${R}"
+                else
+                    hint=" ${D}· $desc${R}"
+                fi
+            fi
+        fi
+    else
+        label="default"
+        color="$G"
+    fi
+    printf '%bYou%b [%b%s%b]%b> ' "$B" "$R" "$color" "$label" "$hint" "$R"
+}
+
 parse_frontmatter() {
     local file="$1"
     FM_DESC=""
@@ -826,10 +853,11 @@ history -r
 
 echo -e "${B}DeepSeek AI Agent${R} v${AI_AGENT_VERSION}  (${C}${MODEL}${R}) (${BASE_URL})"
 echo -e "Type ${C}/help${R} for commands"
+echo -e "Prompt shows current agent (e.g. ${G}You [default]${R} vs ${Y}You [code-reviewer]${R})"
 echo ""
 
 while true; do
-    IFS= read -e -p $'\e[1;32mYou>\e[0m ' -r input || { echo; exit 0; }
+    IFS= read -e -p "$(_agent_prompt)" -r input || { echo; exit 0; }
     input="${input%"${input##*[![:space:]]}"}"
     [[ -z "$input" ]] && continue
     history -s "$input"
