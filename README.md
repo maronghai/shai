@@ -159,9 +159,9 @@ Commands:
 | Command | Effect |
 |---|---|
 | `/agent` | Show current agent (name, description, tags, db, msgs, tools) |
-| `/agent <name>` | Switch to `agents/<name>/` (or `default` for the root prompt) |
+| `/agent <name\|id>` | Switch to `agents/<name>/` (or `default`); `id` is the 1-based number from `/agents` |
 | `/agent reload` | Reload the current agent's prompt + tools |
-| `/agents` | List all available agents, current one marked `*` |
+| `/agents` | List all available agents (numbered), current one marked `*` |
 | `/agents @tag` | List only agents whose frontmatter tags include `tag` |
 | `/board [topic]` | List blackboard topics or show entries for one |
 

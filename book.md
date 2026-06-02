@@ -936,17 +936,31 @@ tools/
 ### 13.3 切换命令
 
 ```
-/agent                # 当前 agent 多行状态: name/description/tags/db/msgs/tools
-/agent coordinator    # 切到 coordinator；持久化到 .data/.current_agent
-/agent default        # 切回默认（无 agent）
-/agent reload         # 重新读 system.md + 重新生成 tools 缓存
-/agents               # 列出所有可用 agent；当前 agent 前面加 *
-/agents @tag          # 只列 tags 包含 @tag 的 agent
+/agent                     # 当前 agent 多行状态: name/description/tags/db/msgs/tools
+/agent <name|id>           # 切到指定 agent；id 是 /agents 列表的 1-based 编号
+/agent default             # 切回默认（无 agent）
+/agent reload              # 重新读 system.md + 重新生成 tools 缓存
+/agents                    # 列出所有可用 agent（带 1-based 编号），当前 agent 前面加 *
+/agents @tag               # 只列 tags 包含 @tag 的 agent
 ```
+
+`/agents` 输出形如：
+
+```
+*  1. default            role
+   2. code-reviewer      Reviews source code in read-only mode   [review, read-only]
+   3. coordinator        Multi-agent orchestrator                [orchestration, planning, delegation]
+```
+
+数字编号稳定：`1` 永远是 default，`2..N` 永远按 `agents/<name>/` 目录迭代顺序。
+用 `/agents @review` 过滤后，剩下的 agent **保留原始编号**——所以
+"用 `/agents @review` 找到 code-reviewer" 和 "直接 `/agents` 找" 都能用
+`/agent 2` 切过去。
 
 切换做了四件事：
 
-1. 校验新名字 `^[a-zA-Z0-9_-]+$`，不通过就报错不改状态。
+1. 校验新名字 `^[a-zA-Z0-9_-]+$`（或通过 `_resolve_agent_id` 把数字
+   翻译回名字），不通过就报错不改状态。
 2. 检查 `agents/<name>/system.md` 存在；不存在就报错。
 3. 把 `CURRENT_AGENT` 写到 `.data/.current_agent`。
 4. 清掉 `tools_cache` + `tools_desc`，下一次循环里 `load_tools` 重新生成。

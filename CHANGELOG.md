@@ -88,6 +88,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **`/agents @tag` filter.** New subcommand `/agents @<tag>` lists only
   agents whose `tags` CSV contains that tag. `no agents match tag @x`
   is printed if nothing matches; `/agents @` (empty) prints the usage.
+- **Numbered `/agents` and `/agent <id>`.** `/agents` now prints a
+  1-based index in front of each row (default = 1, then named agents
+  in directory order). The numbers stay stable across tag filters (so
+  `/agent 2` always means the second slot, regardless of which `/agents
+  @tag` you used to find it). `/agent <N>` resolves the number via the
+  new `_resolve_agent_id` helper and then calls the existing
+  `switch_agent`. Out-of-range numbers print `no agent with id N
+  (try /agents to list)`; the name form is unchanged.
 - **Tool namespace merge in `load_tools`.** When a named agent is active, the
   agent's `agents/<name>/tools/*.json` is loaded *after* the base
   `tools/*.json`, and the merge dedupes by `function.name` with last-wins

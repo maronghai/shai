@@ -11,4 +11,4 @@ Keep answers concise and practical.
 # output
 No non-printing characters.
 No invisible characters.
-No ```
+No ``` block

@@ -326,10 +326,10 @@ help() {
   /hist <id>        - Show one message (full content) + its tool calls"
     echo "  /tools            - List available tools"
     echo "  /tools reload     - Reload tools from $TOOLS_DIR"
-    echo "  /agent            - Show current agent (name, db, msgs, tools)"
-    echo "  /agent <name>     - Switch to named agent (or 'default')"
+    echo "  /agent            - Show current agent (name, description, tags, db, msgs, tools)"
+    echo "  /agent <name|id>  - Switch to named agent (or 1-based /agents list number)"
     echo "  /agent reload     - Reload current agent's prompt + tools"
-    echo "  /agents           - List all available agents (with description and tags)
+    echo "  /agents           - List all available agents (numbered; with description and tags)
   /agents @tag      - List agents whose frontmatter tags include @tag"
     echo "  /board [topic]    - List blackboard topics or show entries for a topic"
     echo "  /help             - Show this help"
@@ -464,15 +464,25 @@ load_tools() {
     printf '%s' "$tool_descriptions" > "$TOOLS_DESC_CACHE"
 }
 
+_print_agent_line() {
+    local idx="$1" name="$2" desc="$3" tags="$4" marker="$5"
+    if [[ -n "$tags" ]]; then
+        printf '%s %2d. %-18s %-44s [%s]\n' "$marker" "$idx" "$name" "$desc" "$tags"
+    else
+        printf '%s %2d. %-18s %s\n' "$marker" "$idx" "$name" "$desc"
+    fi
+}
+
 list_agents() {
     local filter_tag="${1:-}"
-    local marker name desc tags d found=0
+    local marker name desc tags d found=0 idx=0
     if [[ -z "$CURRENT_AGENT" ]]; then marker="*"; else marker=" "; fi
     desc=$(agent_description "${WORK_DIR}/SYSTEM_PROMPT.md")
     [[ -z "$desc" ]] && desc="(no description)"
     tags=$(agent_tags "${WORK_DIR}/SYSTEM_PROMPT.md")
     if _agent_matches_tag "$tags" "$filter_tag"; then
-        _print_agent_line "default" "$desc" "$tags" "$marker"
+        idx=$((idx+1))
+        _print_agent_line "$idx" "default" "$desc" "$tags" "$marker"
         found=1
     fi
     if [[ -d "$AGENTS_DIR" ]]; then
@@ -485,7 +495,8 @@ list_agents() {
             tags=$(agent_tags "$d/system.md")
             if [[ "$name" == "$CURRENT_AGENT" ]]; then marker="*"; else marker=" "; fi
             if _agent_matches_tag "$tags" "$filter_tag"; then
-                _print_agent_line "$name" "$desc" "$tags" "$marker"
+                idx=$((idx+1))
+                _print_agent_line "$idx" "$name" "$desc" "$tags" "$marker"
                 found=1
             fi
         done
@@ -493,6 +504,27 @@ list_agents() {
     if [[ $found -eq 0 && -n "$filter_tag" ]]; then
         warn "no agents match tag @$filter_tag"
     fi
+}
+
+# Echo the agent name corresponding to the Nth entry in list_agents order
+# (1-based: 1 = default, 2..N = named agents in directory iteration order).
+# Returns 0 on success, 1 if the id is out of range. Pure helper, no side effects.
+_resolve_agent_id() {
+    local target="$1"
+    [[ "$target" =~ ^[0-9]+$ ]] || return 1
+    local idx=0 d name
+    idx=$((idx+1))
+    if [[ "$idx" == "$target" ]]; then echo "default"; return 0; fi
+    if [[ -d "$AGENTS_DIR" ]]; then
+        for d in "$AGENTS_DIR"/*/; do
+            [[ -d "$d" ]] || continue
+            name=$(basename "$d")
+            [[ ! -f "$d/system.md" ]] && continue
+            idx=$((idx+1))
+            if [[ "$idx" == "$target" ]]; then echo "$name"; return 0; fi
+        done
+    fi
+    return 1
 }
 
 switch_agent() {
@@ -605,15 +637,6 @@ _agent_matches_tag() {
         [[ -n "$t" && "$t" == "$filter_tag" ]] && return 0
     done
     return 1
-}
-
-_print_agent_line() {
-    local name="$1" desc="$2" tags="$3" marker="$4"
-    if [[ -n "$tags" ]]; then
-        printf '%s %-20s %-44s [%s]\n' "$marker" "$name" "$desc" "$tags"
-    else
-        printf '%s %-20s %s\n' "$marker" "$name" "$desc"
-    fi
 }
 
 run_non_interactive() {
@@ -843,10 +866,21 @@ while true; do
             else
                 arg="${input#/agent }"
                 arg="${arg% }"
-                if switch_agent "$arg"; then
-                    ok "Switched to: $arg"
+                if [[ -n "$arg" && "$arg" =~ ^[0-9]+$ ]]; then
+                    resolved=$(_resolve_agent_id "$arg") || {
+                        warn "no agent with id $arg (try /agents to list)"
+                        continue
+                    }
+                    arg="$resolved"
+                fi
+                if [[ -n "$arg" ]]; then
+                    if switch_agent "$arg"; then
+                        ok "Switched to: $arg"
+                    else
+                        list_agents 2>/dev/null
+                    fi
                 else
-                    list_agents 2>/dev/null
+                    agent_status
                 fi
             fi
             continue
