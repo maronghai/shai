@@ -70,6 +70,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (with full `arguments` and `result`, no length truncation), and
   `/hist <id>` prints a single message by id together with its tool
   calls. Unknown ids print `no message with id=N` and continue.
+- **`/hist full <id>` subcommand.** Combines the two previous modes:
+  renders a single message in the `_hist_full` style (block header with
+  role + `has_tool_calls`, full `content` / `raw_input` / `thinking`,
+  and all associated `tool_call` blocks) instead of the slimmer
+  `_hist_one` style. Non-numeric ids print `id must be numeric`; missing
+  ids print `no message with id=N` and the REPL continues.
 - **YAML-ish frontmatter in `agents/<name>/system.md`.** A `---`-fenced
   block at the top of an agent's `system.md` can declare
   `description: <short text>` and `tags: <csv>`. `list_agents` shows

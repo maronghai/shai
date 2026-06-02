@@ -65,19 +65,41 @@ trap 'history -w 2>/dev/null || true' EXIT
 trap 'echo; history -w 2>/dev/null || true; exit 0' INT
 
 _hist_full() {
+    local target_id="${1:-}"
+    local where=""
+    if [[ -n "$target_id" ]]; then
+        if ! [[ "$target_id" =~ ^[0-9]+$ ]]; then
+            warn "id must be numeric: $target_id"
+            return 1
+        fi
+        where=" WHERE id=$target_id"
+    fi
     local n_msgs n_tcs
-    n_msgs=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM messages" 2>/dev/null)
-    n_tcs=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM tool_calls" 2>/dev/null)
-    echo "== full history ($n_msgs messages, $n_tcs tool_calls) =="
+    n_msgs=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM messages$where" 2>/dev/null)
+    n_tcs=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM tool_calls${where/tool_calls/messages}" 2>/dev/null)
+    if [[ -n "$target_id" ]]; then
+        echo "== full message #$target_id =="
+    else
+        echo "== full history ($n_msgs messages, $n_tcs tool_calls) =="
+    fi
     if [[ -z "$n_msgs" || "$n_msgs" == "0" ]]; then
+        if [[ -n "$target_id" ]]; then
+            warn "no message with id=$target_id"
+            return 1
+        fi
         echo "(no messages)"
         return
     fi
     local sep="----------------------------------------"
-    local rows id role content raw_input thinking has_tc
-    rows=$(sqlite3 -separator $'\x1f' "$DB_PATH" "SELECT id, role, content, COALESCE(raw_input,''), COALESCE(thinking,''), CASE WHEN EXISTS(SELECT 1 FROM tool_calls WHERE message_id=messages.id) THEN 1 ELSE 0 END FROM messages ORDER BY id")
-    while IFS=$'\x1f' read -r id role content raw_input thinking has_tc; do
-        [[ -z "$id" ]] && continue
+    local id role content raw_input thinking has_tc
+    local ids
+    ids=$(sqlite3 "$DB_PATH" "SELECT id FROM messages$where ORDER BY id" 2>/dev/null)
+    for id in $ids; do
+        role=$(sqlite3 "$DB_PATH" "SELECT role FROM messages WHERE id=$id" 2>/dev/null)
+        content=$(sqlite3 "$DB_PATH" "SELECT content FROM messages WHERE id=$id" 2>/dev/null)
+        raw_input=$(sqlite3 "$DB_PATH" "SELECT COALESCE(raw_input,'') FROM messages WHERE id=$id" 2>/dev/null)
+        thinking=$(sqlite3 "$DB_PATH" "SELECT COALESCE(thinking,'') FROM messages WHERE id=$id" 2>/dev/null)
+        has_tc=$(sqlite3 "$DB_PATH" "SELECT CASE WHEN EXISTS(SELECT 1 FROM tool_calls WHERE message_id=$id) THEN 1 ELSE 0 END" 2>/dev/null)
         echo "$sep"
         echo "#$id  role=$role  has_tool_calls=$has_tc"
         if [[ -n "$content" ]]; then
@@ -93,10 +115,12 @@ _hist_full() {
             echo "$thinking"
         fi
         if [[ "$has_tc" == "1" ]]; then
-            local tc_rows tc_id tc_name tc_args tc_result
-            tc_rows=$(sqlite3 -separator $'\x1f' "$DB_PATH" "SELECT id, name, arguments, COALESCE(result,'') FROM tool_calls WHERE message_id=$id ORDER BY rowid")
-            while IFS=$'\x1f' read -r tc_id tc_name tc_args tc_result; do
-                [[ -z "$tc_id" ]] && continue
+            local tc_ids tc_id tc_name tc_args tc_result
+            tc_ids=$(sqlite3 "$DB_PATH" "SELECT id FROM tool_calls WHERE message_id=$id ORDER BY rowid" 2>/dev/null)
+            for tc_id in $tc_ids; do
+                tc_name=$(sqlite3 "$DB_PATH" "SELECT name FROM tool_calls WHERE id='$tc_id'" 2>/dev/null)
+                tc_args=$(sqlite3 "$DB_PATH" "SELECT arguments FROM tool_calls WHERE id='$tc_id'" 2>/dev/null)
+                tc_result=$(sqlite3 "$DB_PATH" "SELECT COALESCE(result,'') FROM tool_calls WHERE id='$tc_id'" 2>/dev/null)
                 [[ -z "$tc_name" ]] && tc_name="(unnamed)"
                 echo "  tool: $tc_name  id=$tc_id"
                 echo "  [arguments]"
@@ -105,22 +129,23 @@ _hist_full() {
                     echo "  [result]"
                     echo "$tc_result" | sed 's/^/    /'
                 fi
-            done <<< "$tc_rows"
+            done
         fi
-    done <<< "$rows"
+    done
     echo "$sep"
 }
 
 _hist_one() {
     local id="$1"
-    local row
-    row=$(sqlite3 -separator $'\x1f' "$DB_PATH" "SELECT id, role, content, COALESCE(raw_input,''), COALESCE(thinking,'') FROM messages WHERE id=$id" 2>/dev/null)
-    if [[ -z "$row" ]]; then
+    local role content raw_input thinking
+    role=$(sqlite3 "$DB_PATH" "SELECT role FROM messages WHERE id=$id" 2>/dev/null)
+    if [[ -z "$role" ]]; then
         warn "no message with id=$id"
         return 1
     fi
-    local role content raw_input thinking
-    IFS=$'\x1f' read -r id role content raw_input thinking <<< "$row"
+    content=$(sqlite3 "$DB_PATH" "SELECT content FROM messages WHERE id=$id" 2>/dev/null)
+    raw_input=$(sqlite3 "$DB_PATH" "SELECT COALESCE(raw_input,'') FROM messages WHERE id=$id" 2>/dev/null)
+    thinking=$(sqlite3 "$DB_PATH" "SELECT COALESCE(thinking,'') FROM messages WHERE id=$id" 2>/dev/null)
     echo "== message #$id =="
     echo "role: $role"
     if [[ -n "$content" ]]; then
@@ -138,12 +163,13 @@ _hist_one() {
         echo "[thinking]"
         echo "$thinking"
     fi
-    local tc_rows
-    tc_rows=$(sqlite3 -separator $'\x1f' "$DB_PATH" "SELECT id, name, arguments, COALESCE(result,'') FROM tool_calls WHERE message_id=$id ORDER BY rowid")
-    if [[ -n "$tc_rows" ]]; then
-        local tc_id tc_name tc_args tc_result
-        while IFS=$'\x1f' read -r tc_id tc_name tc_args tc_result; do
-            [[ -z "$tc_id" ]] && continue
+    local tc_ids tc_id tc_name tc_args tc_result
+    tc_ids=$(sqlite3 "$DB_PATH" "SELECT id FROM tool_calls WHERE message_id=$id ORDER BY rowid" 2>/dev/null)
+    if [[ -n "$tc_ids" ]]; then
+        for tc_id in $tc_ids; do
+            tc_name=$(sqlite3 "$DB_PATH" "SELECT name FROM tool_calls WHERE id='$tc_id'" 2>/dev/null)
+            tc_args=$(sqlite3 "$DB_PATH" "SELECT arguments FROM tool_calls WHERE id='$tc_id'" 2>/dev/null)
+            tc_result=$(sqlite3 "$DB_PATH" "SELECT COALESCE(result,'') FROM tool_calls WHERE id='$tc_id'" 2>/dev/null)
             [[ -z "$tc_name" ]] && tc_name="(unnamed)"
             echo
             echo "tool: $tc_name  id=$tc_id"
@@ -153,7 +179,7 @@ _hist_one() {
                 echo "  [result]"
                 echo "$tc_result" | sed 's/^/    /'
             fi
-        done <<< "$tc_rows"
+        done
     fi
 }
 
@@ -296,6 +322,7 @@ help() {
     echo "  /clear            - Clear conversation history"
     echo "  /hist             - Show recent history (summary view)
   /hist full        - Show every message + tool_call in full
+  /hist full <id>   - Show one message in full style + its tool calls
   /hist <id>        - Show one message (full content) + its tool calls"
     echo "  /tools            - List available tools"
     echo "  /tools reload     - Reload tools from $TOOLS_DIR"
@@ -846,10 +873,12 @@ while true; do
             hist_arg="${hist_arg% }"
             if [[ "$hist_arg" == "full" ]]; then
                 _hist_full || true
+            elif [[ "$hist_arg" =~ ^full\ [0-9]+$ ]]; then
+                _hist_full "${hist_arg#full }" || true
             elif [[ "$hist_arg" =~ ^[0-9]+$ ]]; then
                 _hist_one "$hist_arg" || true
             else
-                warn "usage: /hist | /hist full | /hist <id>"
+                warn "usage: /hist | /hist full | /hist full <id> | /hist <id>"
             fi
             continue
             ;;

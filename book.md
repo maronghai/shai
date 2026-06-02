@@ -1098,21 +1098,28 @@ coordinator 内部大概这么走（实际由模型决策）：
 
 人侧可以 `/board audit-001` 看到完整时间线：`[code-reviewer 的发现] → [default 写的 markdown] → [coordinator 的总结]`。
 
-### 13.9 `/hist` 的三种模式
+### 13.9 `/hist` 的四种模式
 
-`/hist` 现在有三种用法，按"摘要 → 完整 → 单条"递进：
+`/hist` 现在有四种用法，按"摘要 → 完整 → 单条摘要 → 单条完整"递进：
 
 ```
 You> /hist              # 摘要：每条消息截 60 字符，tool_call 只显示 result 长度
 You> /hist full         # 完整：每条 message 完整 content / raw_input / thinking
                         #       + 每条 tool_call 完整 arguments 和 result
-You> /hist 114          # 单条：只显示 id=114 这条 message（完整 content）
-                        #        + 它关联的所有 tool_call
+You> /hist 114          # 单条（_hist_one 风格）：id=114 + 关联 tool_call
+You> /hist full 114     # 单条（_hist_full 风格）：id=114 的 `--- #id role= ...` 块
+                        #                          + 关联 tool_call
 ```
 
-`/hist full` 用 `---` 分隔每条 message，用 `  tool: <name>  id=<call_id>` 缩进显示
-tool_call，缺名占位 `(unnamed)`。`/hist <id>` 找不到时打印 `no message with id=N`
-并继续接受下一条命令（不会因为 `set -e` 中断 REPL）。
+`/hist full [N]` 用 `---` 分隔每条 message，用 `  tool: <name>  id=<call_id>` 缩进
+显示 tool_call，缺名占位 `(unnamed)`。`/hist full` 没有 / 找不到时
+打印 `no message with id=N` 并继续接受下一条命令（不会因为 `set -e` 中断 REPL）；
+非数字 id 打印 `id must be numeric`。
+
+**为什么有 `full <id>` 和 `<id>` 两种单条模式？** `_hist_one` 走 `== message #N ==`
++ 空行分隔的紧凑格式；`_hist_full` 走 `--- #N role=... ---` 块状格式，
+块内字段 `[content]` / `[raw_input]` / `[thinking]` 带方括号标签。两种风格
+分别服务"快速看一眼"和"复制粘贴到 bug 报告"两个场景，按需选。
 
 要看别的 agent 的历史依然要先 `/agent <name>` 切过去——没有跨 agent 的
 `/hist <agent>` 命令，避免一次性 SQL 跨多库带来的复杂度。
