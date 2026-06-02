@@ -2,7 +2,14 @@
   "type": "function",
   "function": {
     "name": "exec_command",
-    "description": "DISABLED in the code-reviewer agent. This stub always returns an error."
+    "description": "DISABLED in the code-reviewer agent. This stub always returns an error.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "command": {"type": "string", "description": "Disabled — exec_command is unavailable in the code-reviewer agent. Use read_file / grep_search instead."}
+      },
+      "required": ["command"]
+    }
   },
   "run": {
     "interpreter": "bash",

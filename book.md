@@ -936,11 +936,12 @@ tools/
 ### 13.3 切换命令
 
 ```
-/agent                # 当前 agent 一行状态: current=coordinator db=.data/chat_coordinator.db msgs=12 tools=7
+/agent                # 当前 agent 多行状态: name/description/tags/db/msgs/tools
 /agent coordinator    # 切到 coordinator；持久化到 .data/.current_agent
 /agent default        # 切回默认（无 agent）
 /agent reload         # 重新读 system.md + 重新生成 tools 缓存
 /agents               # 列出所有可用 agent；当前 agent 前面加 *
+/agents @tag          # 只列 tags 包含 @tag 的 agent
 ```
 
 切换做了四件事：
@@ -950,7 +951,48 @@ tools/
 3. 把 `CURRENT_AGENT` 写到 `.data/.current_agent`。
 4. 清掉 `tools_cache` + `tools_desc`，下一次循环里 `load_tools` 重新生成。
 
-### 13.4 工具命名空间合并
+`/agent` 无参的多行输出形如：
+
+```
+name=coordinator
+description=Multi-agent orchestrator
+tags=orchestration, planning, delegation
+db=./.data/chat_coordinator.db msgs=0 tools=8
+```
+
+`description` 和 `tags` 来自 agent 自己的 `system.md` frontmatter（见 13.4），
+没有就只输出 `name` / `db` / `msgs` / `tools`。
+
+### 13.4 agent frontmatter 与标签过滤
+
+`agents/<name>/system.md` 的顶部可以用一段 `---` 包裹的 YAML-ish 块声明
+agent 的元数据：
+
+```markdown
+---
+description: Multi-agent orchestrator
+tags: orchestration, planning, delegation
+---
+
+# Coordinator — multi-agent orchestrator
+
+You are the coordinator agent...
+```
+
+字段：
+
+| 字段 | 用途 |
+|---|---|
+| `description` | 一句话简介。`/agents` 用它做第二列（之前用的是 H1 行），`agent_list.sh` 把它暴露给子 agent 的 LLM 上下文 |
+| `tags` | 逗号分隔的标签。`/agents @<tag>` 按它过滤；`agent_list.sh` 也作为 `tags` 字段返回 |
+
+`description` 和 `tags` 都可选。**没有 frontmatter 时仍用 H1 行 + 无 tags 列**，
+所以老 persona 不会破。
+
+`/agents @tag` 的实现：`list_agents` 接一个 `filter_tag` 形参，把每个 agent
+的 `tags` 按逗号拆开 trim 后逐项匹配；空过滤就是不过滤。
+
+### 13.5 工具命名空间合并
 
 `load_tools` 加载顺序是：
 
@@ -970,7 +1012,7 @@ exit 1
 
 当 code-reviewer 跑的时候，LLM 仍然在工具列表里看到 `exec_command`（因为 OpenAI 协议要求 tools 数组不变），但凡调用都会拿到 `success:false` 的响应。这是**最小权限示范**——不要靠"prompt 告诉它不要 exec"，要在工具层硬关。
 
-### 13.5 Blackboard
+### 13.6 Blackboard
 
 黑板是一个 SQLite 表，所有 agent 共享一个文件 `.data/blackboard.db`：
 
@@ -1006,7 +1048,7 @@ CREATE INDEX idx_board_reply ON board(reply_to);
 
 人检视用 `/board [topic]`：无参列所有 distinct topic，有参列该 topic 的所有行（含每行的 `id agent created_at reply_to payload`）。
 
-### 13.6 agent_delegate 协议
+### 13.7 agent_delegate 协议
 
 `agent_delegate(agent, task, topic?)` 跑这个流程：
 
@@ -1036,7 +1078,7 @@ CREATE INDEX idx_board_reply ON board(reply_to);
 
 **长度上限**：task ≤ 8000 字，reply ≤ 8000 字，120s 墙钟——避免长跑爆资源。
 
-### 13.7 coordinator 示例
+### 13.8 coordinator 示例
 
 直接问 coordinator：
 
@@ -1056,19 +1098,26 @@ coordinator 内部大概这么走（实际由模型决策）：
 
 人侧可以 `/board audit-001` 看到完整时间线：`[code-reviewer 的发现] → [default 写的 markdown] → [coordinator 的总结]`。
 
-### 13.8 跨 agent 的 `/hist`
+### 13.9 `/hist` 的三种模式
 
-`/hist all` 默认读当前 agent 的 DB（`$DB_PATH`）。要看别的 agent 的历史：
+`/hist` 现在有三种用法，按"摘要 → 完整 → 单条"递进：
 
 ```
-You> /hist
-You> /agent code-reviewer
-You> /hist all
+You> /hist              # 摘要：每条消息截 60 字符，tool_call 只显示 result 长度
+You> /hist full         # 完整：每条 message 完整 content / raw_input / thinking
+                        #       + 每条 tool_call 完整 arguments 和 result
+You> /hist 114          # 单条：只显示 id=114 这条 message（完整 content）
+                        #        + 它关联的所有 tool_call
 ```
 
-——直接切过去看，没有 `/hist <agent>` 这种跨 agent 命令，避免一次性 SQL 跨多库带来的复杂度。
+`/hist full` 用 `---` 分隔每条 message，用 `  tool: <name>  id=<call_id>` 缩进显示
+tool_call，缺名占位 `(unnamed)`。`/hist <id>` 找不到时打印 `no message with id=N`
+并继续接受下一条命令（不会因为 `set -e` 中断 REPL）。
 
-### 13.9 写在最后
+要看别的 agent 的历史依然要先 `/agent <name>` 切过去——没有跨 agent 的
+`/hist <agent>` 命令，避免一次性 SQL 跨多库带来的复杂度。
+
+### 13.10 写在最后
 
 整套多 agent 机制增加的主代码量大约 250 行，分布在 8 个新工具脚本和 `ai-agent.sh` 的几个函数里。设计原则和 v0.0.6 一脉相承：
 

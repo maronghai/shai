@@ -23,6 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   missing the `run` block — so `_load_one_tool` rejected it with
   `Skipping tool 'exec_command': run.script missing`. Fix: add the `run`
   block pointing to the disabled `exec_command.sh` stub.
+- **`code-reviewer/tools/exec_command.json` lacked `function.parameters`.**
+  The override manifest only declared `function.{name, description}`, so
+  when `group_by | map(last)` merged it over the base, the resulting
+  `exec_command` had `parameters: null` in the request body. The MiniMax
+  provider rejected it with `invalid params, function name or parameters
+  is empty (2013)`. Fix: declare a `parameters` schema (mirroring the
+  base) in the override. The model still sees the disabled description
+  and the runtime stub still refuses, so the security boundary is
+  preserved — the fix is purely about request validation.
 
 ### Added
 - **Multi-agent support.** Named agent personas in `agents/<name>/system.md`,
@@ -55,6 +64,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   default + all named agents; useful for orchestrator personas.
 - **`/board` command** for human-friendly inspection of the blackboard
   (lists all topics with counts, or rows for a given topic).
+- **`/hist full` and `/hist <id>` subcommands.** The summary `/hist` now
+  has two new modes: `/hist full` dumps every message with its complete
+  `content` / `raw_input` / `thinking` and every associated `tool_call`
+  (with full `arguments` and `result`, no length truncation), and
+  `/hist <id>` prints a single message by id together with its tool
+  calls. Unknown ids print `no message with id=N` and continue.
+- **YAML-ish frontmatter in `agents/<name>/system.md`.** A `---`-fenced
+  block at the top of an agent's `system.md` can declare
+  `description: <short text>` and `tags: <csv>`. `list_agents` shows
+  the description (instead of the first H1 line) and appends a
+  `[tag1, tag2]` column. `agent_status` prints `name` / `description` /
+  `tags` / `db` / `msgs` / `tools`. `tools/agent_list.sh` exposes
+  `description` and `tags` to sub-agents (the LLM-facing tool). The
+  H1 line is still the fallback if frontmatter is absent, so existing
+  agents keep working.
+- **`/agents @tag` filter.** New subcommand `/agents @<tag>` lists only
+  agents whose `tags` CSV contains that tag. `no agents match tag @x`
+  is printed if nothing matches; `/agents @` (empty) prints the usage.
 - **Tool namespace merge in `load_tools`.** When a named agent is active, the
   agent's `agents/<name>/tools/*.json` is loaded *after* the base
   `tools/*.json`, and the merge dedupes by `function.name` with last-wins

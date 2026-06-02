@@ -130,21 +130,39 @@ own system prompt, conversation history, and tool set.
 ```
 agents/
 ├── coordinator/
-│   └── system.md              ← orchestrator that uses agent_delegate
+│   ├── system.md              ← orchestrator that uses agent_delegate
+│   └── (no tool overrides)
 └── code-reviewer/
     ├── system.md              ← read-only review persona
     └── tools/
-        └── exec_command.sh    ← overrides the base exec_command to refuse
+        ├── exec_command.json  ← override manifest (description only, no run)
+        └── exec_command.sh    ← refuses with a disabled-error stub
 ```
+
+Each `system.md` can declare metadata in a YAML-ish frontmatter block:
+
+```markdown
+---
+description: Read-only review of source code
+tags: review, read-only
+---
+
+# Code reviewer — read-only review of source code
+...
+```
+
+`description` populates the second column of `/agents` and is exposed to
+sub-agents via `agent_list`. `tags` lets you filter with `/agents @tag`.
 
 Commands:
 
 | Command | Effect |
 |---|---|
-| `/agent` | Show current agent (name, db, msgs, tools) |
+| `/agent` | Show current agent (name, description, tags, db, msgs, tools) |
 | `/agent <name>` | Switch to `agents/<name>/` (or `default` for the root prompt) |
 | `/agent reload` | Reload the current agent's prompt + tools |
 | `/agents` | List all available agents, current one marked `*` |
+| `/agents @tag` | List only agents whose frontmatter tags include `tag` |
 | `/board [topic]` | List blackboard topics or show entries for one |
 
 Built-in tools for inter-agent communication:

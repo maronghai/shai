@@ -9,10 +9,21 @@ API_URL="${BASE_URL}/v1/chat/completions"
 
 
 DATA_DIR="${WORK_DIR}/.data"
+TEMP_DIR="${WORK_DIR}/.tmp"
+TOOLS_DIR="${WORK_DIR}/tools"
+LAST_RESPONSE_FILE="${TEMP_DIR}/last-response.txt"
+HISTFILE="$DATA_DIR/.input_history"
+HISTFILESIZE=1000
+HISTSIZE=1000
 AGENTS_DIR="${WORK_DIR}/agents"
 CURRENT_AGENT=""
 CURRENT_AGENT_FILE="$DATA_DIR/.current_agent"
 BLACKBOARD_DB="$DATA_DIR/blackboard.db"
+MAX_HISTORY=40
+
+R='\033[0m'; B='\033[1;34m'; G='\033[1;32m'; Y='\033[1;33m'; C='\033[1;36m'; M='\033[1;35m'; D='\033[2m'; DM='\033[90m'
+
+mkdir -p "$DATA_DIR" "$TEMP_DIR"
 
 db_path() {
     if [[ -z "$CURRENT_AGENT" ]]; then
@@ -21,17 +32,14 @@ db_path() {
         echo "$DATA_DIR/chat_${CURRENT_AGENT}.db"
     fi
 }
-MAX_HISTORY=40
-TEMP_DIR="${WORK_DIR}/.tmp"
-TOOLS_DIR="${WORK_DIR}/tools"
-LAST_RESPONSE_FILE="${TEMP_DIR}/last-response.txt"
-HISTFILE="$DATA_DIR/.input_history"
-HISTFILESIZE=1000
-HISTSIZE=1000
 
-R='\033[0m'; B='\033[1;34m'; G='\033[1;32m'; Y='\033[1;33m'; C='\033[1;36m'; M='\033[1;35m'; D='\033[2m'; DM='\033[90m'
-
-mkdir -p "$DATA_DIR" "$TEMP_DIR"
+load_system_prompt() {
+    if [[ -n "$CURRENT_AGENT" ]]; then
+        cat "$AGENTS_DIR/$CURRENT_AGENT/system.md" 2>/dev/null
+    else
+        cat "${WORK_DIR}/SYSTEM_PROMPT.md" 2>/dev/null
+    fi
+}
 
 if [[ -f "$CURRENT_AGENT_FILE" ]]; then
     _candidate=$(cat "$CURRENT_AGENT_FILE" 2>/dev/null) || _candidate=""
@@ -49,15 +57,106 @@ TOOLS_DESC_CACHE="$DATA_DIR/tools_desc${CURRENT_AGENT:+_$CURRENT_AGENT}.txt"
 trap 'history -w 2>/dev/null || true' EXIT
 trap 'echo; history -w 2>/dev/null || true; exit 0' INT
 
-command -v sqlite3 >/dev/null 2>&1 || { echo "Error: sqlite3 is required" >&2; exit 1; }
+DB_PATH=$(db_path)
+TOOLS_CACHE="$DATA_DIR/tools_cache${CURRENT_AGENT:+_$CURRENT_AGENT}.json"
+TOOLS_DESC_CACHE="$DATA_DIR/tools_desc${CURRENT_AGENT:+_$CURRENT_AGENT}.txt"
 
-load_system_prompt() {
-    if [[ -n "$CURRENT_AGENT" ]]; then
-        cat "$AGENTS_DIR/$CURRENT_AGENT/system.md" 2>/dev/null
-    else
-        cat "${WORK_DIR}/SYSTEM_PROMPT.md" 2>/dev/null
+trap 'history -w 2>/dev/null || true' EXIT
+trap 'echo; history -w 2>/dev/null || true; exit 0' INT
+
+_hist_full() {
+    local n_msgs n_tcs
+    n_msgs=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM messages" 2>/dev/null)
+    n_tcs=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM tool_calls" 2>/dev/null)
+    echo "== full history ($n_msgs messages, $n_tcs tool_calls) =="
+    if [[ -z "$n_msgs" || "$n_msgs" == "0" ]]; then
+        echo "(no messages)"
+        return
+    fi
+    local sep="----------------------------------------"
+    local rows id role content raw_input thinking has_tc
+    rows=$(sqlite3 -separator $'\x1f' "$DB_PATH" "SELECT id, role, content, COALESCE(raw_input,''), COALESCE(thinking,''), CASE WHEN EXISTS(SELECT 1 FROM tool_calls WHERE message_id=messages.id) THEN 1 ELSE 0 END FROM messages ORDER BY id")
+    while IFS=$'\x1f' read -r id role content raw_input thinking has_tc; do
+        [[ -z "$id" ]] && continue
+        echo "$sep"
+        echo "#$id  role=$role  has_tool_calls=$has_tc"
+        if [[ -n "$content" ]]; then
+            echo "[content]"
+            echo "$content"
+        fi
+        if [[ -n "$raw_input" ]]; then
+            echo "[raw_input]"
+            echo "$raw_input"
+        fi
+        if [[ -n "$thinking" ]]; then
+            echo "[thinking]"
+            echo "$thinking"
+        fi
+        if [[ "$has_tc" == "1" ]]; then
+            local tc_rows tc_id tc_name tc_args tc_result
+            tc_rows=$(sqlite3 -separator $'\x1f' "$DB_PATH" "SELECT id, name, arguments, COALESCE(result,'') FROM tool_calls WHERE message_id=$id ORDER BY rowid")
+            while IFS=$'\x1f' read -r tc_id tc_name tc_args tc_result; do
+                [[ -z "$tc_id" ]] && continue
+                [[ -z "$tc_name" ]] && tc_name="(unnamed)"
+                echo "  tool: $tc_name  id=$tc_id"
+                echo "  [arguments]"
+                echo "$tc_args" | sed 's/^/    /'
+                if [[ -n "$tc_result" ]]; then
+                    echo "  [result]"
+                    echo "$tc_result" | sed 's/^/    /'
+                fi
+            done <<< "$tc_rows"
+        fi
+    done <<< "$rows"
+    echo "$sep"
+}
+
+_hist_one() {
+    local id="$1"
+    local row
+    row=$(sqlite3 -separator $'\x1f' "$DB_PATH" "SELECT id, role, content, COALESCE(raw_input,''), COALESCE(thinking,'') FROM messages WHERE id=$id" 2>/dev/null)
+    if [[ -z "$row" ]]; then
+        warn "no message with id=$id"
+        return 1
+    fi
+    local role content raw_input thinking
+    IFS=$'\x1f' read -r id role content raw_input thinking <<< "$row"
+    echo "== message #$id =="
+    echo "role: $role"
+    if [[ -n "$content" ]]; then
+        echo
+        echo "[content]"
+        echo "$content"
+    fi
+    if [[ -n "$raw_input" ]]; then
+        echo
+        echo "[raw_input]"
+        echo "$raw_input"
+    fi
+    if [[ -n "$thinking" ]]; then
+        echo
+        echo "[thinking]"
+        echo "$thinking"
+    fi
+    local tc_rows
+    tc_rows=$(sqlite3 -separator $'\x1f' "$DB_PATH" "SELECT id, name, arguments, COALESCE(result,'') FROM tool_calls WHERE message_id=$id ORDER BY rowid")
+    if [[ -n "$tc_rows" ]]; then
+        local tc_id tc_name tc_args tc_result
+        while IFS=$'\x1f' read -r tc_id tc_name tc_args tc_result; do
+            [[ -z "$tc_id" ]] && continue
+            [[ -z "$tc_name" ]] && tc_name="(unnamed)"
+            echo
+            echo "tool: $tc_name  id=$tc_id"
+            echo "  [arguments]"
+            echo "$tc_args" | sed 's/^/    /'
+            if [[ -n "$tc_result" ]]; then
+                echo "  [result]"
+                echo "$tc_result" | sed 's/^/    /'
+            fi
+        done <<< "$tc_rows"
     fi
 }
+
 SYSTEM_PROMPT="$(load_system_prompt)"
 
 init_db() {
@@ -195,13 +294,16 @@ help() {
     echo "  /exec <command>   - Execute shell command and add output as context"
     echo "  /save <path>      - Save last assistant response to file"
     echo "  /clear            - Clear conversation history"
-    echo "  /hist             - Show recent history"
+    echo "  /hist             - Show recent history (summary view)
+  /hist full        - Show every message + tool_call in full
+  /hist <id>        - Show one message (full content) + its tool calls"
     echo "  /tools            - List available tools"
     echo "  /tools reload     - Reload tools from $TOOLS_DIR"
     echo "  /agent            - Show current agent (name, db, msgs, tools)"
     echo "  /agent <name>     - Switch to named agent (or 'default')"
     echo "  /agent reload     - Reload current agent's prompt + tools"
-    echo "  /agents           - List all available agents"
+    echo "  /agents           - List all available agents (with description and tags)
+  /agents @tag      - List agents whose frontmatter tags include @tag"
     echo "  /board [topic]    - List blackboard topics or show entries for a topic"
     echo "  /help             - Show this help"
     echo "  /reload           - Reload the program"
@@ -336,22 +438,33 @@ load_tools() {
 }
 
 list_agents() {
-    local marker name desc d
+    local filter_tag="${1:-}"
+    local marker name desc tags d found=0
     if [[ -z "$CURRENT_AGENT" ]]; then marker="*"; else marker=" "; fi
-    desc=$(head -1 "${WORK_DIR}/SYSTEM_PROMPT.md" 2>/dev/null | sed 's/^# *//')
+    desc=$(agent_description "${WORK_DIR}/SYSTEM_PROMPT.md")
     [[ -z "$desc" ]] && desc="(no description)"
-    printf '%s %-20s %s\n' "$marker" "default" "$desc"
+    tags=$(agent_tags "${WORK_DIR}/SYSTEM_PROMPT.md")
+    if _agent_matches_tag "$tags" "$filter_tag"; then
+        _print_agent_line "default" "$desc" "$tags" "$marker"
+        found=1
+    fi
     if [[ -d "$AGENTS_DIR" ]]; then
         for d in "$AGENTS_DIR"/*/; do
             [[ -d "$d" ]] || continue
             name=$(basename "$d")
-            [[ "$name" == "*" ]] && continue
             [[ ! -f "$d/system.md" ]] && continue
-            desc=$(head -1 "$d/system.md" 2>/dev/null | sed 's/^# *//')
+            desc=$(agent_description "$d/system.md")
             [[ -z "$desc" ]] && desc="(no description)"
+            tags=$(agent_tags "$d/system.md")
             if [[ "$name" == "$CURRENT_AGENT" ]]; then marker="*"; else marker=" "; fi
-            printf '%s %-20s %s\n' "$marker" "$name" "$desc"
+            if _agent_matches_tag "$tags" "$filter_tag"; then
+                _print_agent_line "$name" "$desc" "$tags" "$marker"
+                found=1
+            fi
         done
+    fi
+    if [[ $found -eq 0 && -n "$filter_tag" ]]; then
+        warn "no agents match tag @$filter_tag"
     fi
 }
 
@@ -405,7 +518,75 @@ agent_status() {
     if [[ -z "$CURRENT_AGENT" ]]; then cur="default"; else cur="$CURRENT_AGENT"; fi
     msgs_n=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM messages" 2>/dev/null || echo 0)
     tools_n=$(echo "$tools_json" | jq 'length' 2>/dev/null || echo 0)
-    printf 'current=%s db=%s msgs=%s tools=%s\n' "$cur" "$DB_PATH" "$msgs_n" "$tools_n"
+    local desc tags f
+    if [[ -n "$CURRENT_AGENT" ]]; then f="$AGENTS_DIR/$CURRENT_AGENT/system.md"; else f="${WORK_DIR}/SYSTEM_PROMPT.md"; fi
+    desc=$(agent_description "$f")
+    tags=$(agent_tags "$f")
+    printf 'name=%s\n' "$cur"
+    [[ -n "$desc" ]] && printf 'description=%s\n' "$desc"
+    [[ -n "$tags" ]] && printf 'tags=%s\n' "$tags"
+    printf 'db=%s msgs=%s tools=%s\n' "$DB_PATH" "$msgs_n" "$tools_n"
+}
+
+parse_frontmatter() {
+    local file="$1"
+    FM_DESC=""
+    FM_TAGS=""
+    [[ ! -f "$file" ]] && return 1
+    local in_fm=0 line key val
+    while IFS= read -r line; do
+        if [[ "$line" == "---" ]]; then
+            ((in_fm++))
+            [[ $in_fm -ge 2 ]] && break
+            continue
+        fi
+        if [[ $in_fm -eq 1 && "$line" =~ ^[[:space:]]*([a-zA-Z_][a-zA-Z0-9_-]*)[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+            key="${BASH_REMATCH[1]}"
+            val="${BASH_REMATCH[2]}"
+            case "$key" in
+                description) FM_DESC="$val" ;;
+                tags) FM_TAGS="$val" ;;
+            esac
+        fi
+    done < <(head -20 "$file")
+}
+
+agent_description() {
+    local file="$1"
+    parse_frontmatter "$file"
+    if [[ -n "$FM_DESC" ]]; then
+        echo "$FM_DESC"
+    else
+        head -1 "$file" 2>/dev/null | sed 's/^# *//'
+    fi
+}
+
+agent_tags() {
+    local file="$1"
+    parse_frontmatter "$file"
+    echo "$FM_TAGS"
+}
+
+_agent_matches_tag() {
+    local tags="$1" filter_tag="$2"
+    if [[ -z "$filter_tag" ]]; then return 0; fi
+    local IFS=','
+    local t
+    for t in $tags; do
+        t="${t#"${t%%[![:space:]]*}"}"
+        t="${t%"${t##*[![:space:]]}"}"
+        [[ -n "$t" && "$t" == "$filter_tag" ]] && return 0
+    done
+    return 1
+}
+
+_print_agent_line() {
+    local name="$1" desc="$2" tags="$3" marker="$4"
+    if [[ -n "$tags" ]]; then
+        printf '%s %-20s %-44s [%s]\n' "$marker" "$name" "$desc" "$tags"
+    else
+        printf '%s %-20s %s\n' "$marker" "$name" "$desc"
+    fi
 }
 
 run_non_interactive() {
@@ -611,6 +792,17 @@ while true; do
             list_agents
             continue
             ;;
+        /agents\ *)
+            filter="${input#/agents }"
+            filter="${filter#@}"
+            filter="${filter% }"
+            if [[ -z "$filter" ]]; then
+                warn "usage: /agents [@tag]"
+            else
+                list_agents "$filter"
+            fi
+            continue
+            ;;
         /agent*)
             if [[ "$input" == "/agent" ]]; then
                 agent_status
@@ -647,6 +839,18 @@ while true; do
             arg="${arg% }"
             echo "== board topic='$arg' =="
             sqlite3 -header -column "$BLACKBOARD_DB" "SELECT id, agent, substr(payload,1,80) as payload, COALESCE(reply_to,'') as reply_to, created_at FROM board WHERE topic = $(bb_quote "$arg") ORDER BY id" 2>/dev/null || info "no entries"
+            continue
+            ;;
+        /hist\ *)
+            hist_arg="${input#/hist }"
+            hist_arg="${hist_arg% }"
+            if [[ "$hist_arg" == "full" ]]; then
+                _hist_full || true
+            elif [[ "$hist_arg" =~ ^[0-9]+$ ]]; then
+                _hist_one "$hist_arg" || true
+            else
+                warn "usage: /hist | /hist full | /hist <id>"
+            fi
             continue
             ;;
         /hist)
