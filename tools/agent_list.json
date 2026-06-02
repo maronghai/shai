@@ -1,0 +1,15 @@
+{
+  "type": "function",
+  "function": {
+    "name": "agent_list",
+    "description": "List all available agents (default + named under agents/*/system.md). Returns a JSON array of {name, description}.",
+    "parameters": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  "run": {
+    "interpreter": "bash",
+    "script": "agent_list.sh"
+  }
+}

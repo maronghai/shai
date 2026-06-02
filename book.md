@@ -4,7 +4,7 @@
 
 在人工智能飞速发展的今天，AI 编程助手已成为开发者离不开的工具。但大多数 AI 助手只停留在"问答"层面，无法真正操作你的代码库、执行命令或读取文件。
 
-**ai-agent.sh** 打破了这个局限——它仅用 394 行 Bash 脚本，就构建了一个完整的 AI Agent 终端环境。它连接 DeepSeek 大模型 API，让你的终端变成一个**能读、能搜、能执行、能自主调用工具**的智能代理。
+**ai-agent.sh** 打破了这个局限——它仅用 ~780 行 Bash 脚本（v0.1.0），就构建了一个完整的 AI Agent 终端环境。它连接任何 OpenAI 兼容的 API，让你的终端变成一个**能读、能搜、能执行、能自主调用工具**，并且**支持多 agent 切换与委派**的智能代理。
 
 本书将带你从零开始，全面掌握 ai-agent.sh 的使用、原理与扩展。
 
@@ -20,7 +20,7 @@ ai-agent.sh 是一个基于 Bash 脚本的 AI Agent 终端程序，它：
 - 在终端中提供交互式对话界面
 - 支持 **工具调用**（Tool Calling）：读取文件、搜索代码、执行命令
 - 使用 **SQLite** 持久化对话历史
-- 所有功能封装在 **单个脚本文件**（394 行）中
+- 所有功能封装在 **单个脚本文件**（~780 行，含多 agent 支持）中
 
 ### 1.2 核心特性
 
@@ -182,7 +182,7 @@ ai-agent.sh 会记住上下文。你可以连续提问：
 
 ```
 You> 这个脚本有多少行？
-Agent> ai-agent.sh 共 394 行。
+Agent> ai-agent.sh 共 780 行左右（含多 agent 支持）。
 
 You> 其中主要有哪些功能函数？
 Agent> 主要功能函数包括：
@@ -884,6 +884,208 @@ You> 请总结这个项目的架构和技术栈
 
 ---
 
+## 第 13 章：多 Agent 编排
+
+从 v0.1.0 开始，ai-agent.sh 支持在同一进程/脚本内切换多个 agent persona，并允许一个 agent 委派任务给另一个 agent 跑。本章解释这套机制是怎么拼起来的。
+
+### 13.1 动机
+
+单 agent 在面对"一个任务需要先调研再写代码再 review"这类多步工作流时，会出现几个问题：
+
+- **角色混淆**：同一个 system prompt 既要负责搜索资料，又要负责遵守代码风格，还要负责做 code review，模型很容易在长上下文里把规则串台。
+- **上下文污染**：写代码时贴的 `import` 列表，污染了 review 阶段的注意力。
+- **工具膨胀**：review 阶段其实只想用 `read_file` + `grep_search`，但 `exec_command` 必须保留在工具列表里（因为前面步骤要用），所以风险敞口大。
+
+解法是 **persona 隔离 + 黑板通信**：每个 agent 自己的 system prompt / DB / 工具集都是独立的；要协调，就写到共享 blackboard 上读。
+
+### 13.2 目录布局
+
+```
+ai-agent.sh
+SYSTEM_PROMPT.md          # 默认 agent 的 system prompt（root context）
+agents/
+├── coordinator/
+│   └── system.md         # 协调者 persona
+└── code-reviewer/
+    ├── system.md         # 只读 review persona
+    └── tools/
+        ├── exec_command.json   # 覆盖基线同名工具
+        └── exec_command.sh     # 拒绝执行，输出错误 JSON
+tools/
+├── read_file.{json,sh}
+├── grep_search.{json,sh}
+├── exec_command.{json,sh}
+├── board_read.{json,sh}        # blackboard
+├── board_write.{json,sh}
+├── board_list.{json,sh}
+├── agent_delegate.{json,sh}    # 委派
+└── agent_list.{json,sh}        # 列出可用 agent
+.data/
+├── chat.db                # default agent 的历史
+├── chat_coordinator.db    # coordinator agent 的历史
+├── chat_code-reviewer.db  # code-reviewer agent 的历史
+├── blackboard.db          # 共享黑板
+├── .current_agent         # 持久化当前 agent 名
+├── tools_cache.json       # default agent 的工具缓存
+├── tools_cache_coordinator.json
+└── tools_desc.txt         # default agent 的工具描述缓存
+```
+
+每个 agent 的历史是**独立**的：`.data/chat_<name>.db`（default 用 `.data/chat.db`）。切换 agent 不带历史跨过去。
+
+### 13.3 切换命令
+
+```
+/agent                # 当前 agent 一行状态: current=coordinator db=.data/chat_coordinator.db msgs=12 tools=7
+/agent coordinator    # 切到 coordinator；持久化到 .data/.current_agent
+/agent default        # 切回默认（无 agent）
+/agent reload         # 重新读 system.md + 重新生成 tools 缓存
+/agents               # 列出所有可用 agent；当前 agent 前面加 *
+```
+
+切换做了四件事：
+
+1. 校验新名字 `^[a-zA-Z0-9_-]+$`，不通过就报错不改状态。
+2. 检查 `agents/<name>/system.md` 存在；不存在就报错。
+3. 把 `CURRENT_AGENT` 写到 `.data/.current_agent`。
+4. 清掉 `tools_cache` + `tools_desc`，下一次循环里 `load_tools` 重新生成。
+
+### 13.4 工具命名空间合并
+
+`load_tools` 加载顺序是：
+
+1. 扫 `tools/*.json` → 8 个基线工具（含 blackboard + agent 工具）。
+2. 如果 `CURRENT_AGENT` 非空，再扫 `agents/$CURRENT_AGENT/tools/*.json`。
+3. 用 `jq` `reverse | unique_by(.function.name) | reverse` 去重，最后出现的胜出。
+
+`code-reviewer/tools/exec_command.json` 的 `function.name` 和基线一样，所以合并后基线那条被 `code-reviewer` 的覆盖。**这就是 agent 工具覆写机制的本质**——同名声明，agent 优先。
+
+`exec_command.sh` 的覆写版本是个 stub：
+
+```sh
+#!/bin/sh
+echo '{"success":false,"error":"exec_command is disabled in this agent (read-only review mode)"}'
+exit 1
+```
+
+当 code-reviewer 跑的时候，LLM 仍然在工具列表里看到 `exec_command`（因为 OpenAI 协议要求 tools 数组不变），但凡调用都会拿到 `success:false` 的响应。这是**最小权限示范**——不要靠"prompt 告诉它不要 exec"，要在工具层硬关。
+
+### 13.5 Blackboard
+
+黑板是一个 SQLite 表，所有 agent 共享一个文件 `.data/blackboard.db`：
+
+```sql
+CREATE TABLE board (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent      TEXT    NOT NULL DEFAULT '',
+    topic      TEXT    NOT NULL,
+    payload    TEXT    NOT NULL,
+    reply_to   INTEGER,
+    created_at TEXT    DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_board_topic ON board(topic);
+CREATE INDEX idx_board_reply ON board(reply_to);
+```
+
+字段语义：
+
+- `id`：自增主键，按时间单调递增。
+- `agent`：写入者名（空串表示 default）。
+- `topic`：业务主键，调用方自己定义；建议格式 `<task-id>[:<sub-topic>]`（如 `review-001:summary`）。
+- `payload`：任意文本，最长 8000 字（`agent_delegate` 写入时强制截断）。
+- `reply_to`：可空，指向另一行的 `id`，用于把多条记录串成线程。
+- `created_at`：写入时间，UTC，`datetime('now')`。
+
+工具：
+
+| 工具 | 输入 | 行为 |
+|------|------|------|
+| `board_write` | `topic, payload, reply_to?` | `INSERT`；返回 `{id, topic, agent, created_at}` |
+| `board_read` | `topic, since_id?, limit?` | `SELECT WHERE topic=? AND id>? ORDER BY id LIMIT ?`；返回 JSON 数组 |
+| `board_list` | `prefix?` | `SELECT DISTINCT topic ORDER BY topic`；返回 JSON 数组 |
+
+人检视用 `/board [topic]`：无参列所有 distinct topic，有参列该 topic 的所有行（含每行的 `id agent created_at reply_to payload`）。
+
+### 13.6 agent_delegate 协议
+
+`agent_delegate(agent, task, topic?)` 跑这个流程：
+
+1. 校验 `agent` 名（regex + 存在性 + 系统级 `default` 拒绝）。
+2. 校验 `task` 长度 ≤ 8000 字。
+3. 在 blackboard 上写一行占位记录，拿到 `parent_id`。
+4. `fork` 一个 `bash ai-agent.sh` 子进程，环境里设置：
+   - `NON_INTERACTIVE=1`（让脚本走 `run_non_interactive` 入口）
+   - `AGENT_NAME=<agent>`（子 agent 走它的 context）
+   - `DELEGATION_DEPTH=$(( 当前 + 1 ))`
+   - `PARENT_ID=<parent_id>`（子 agent 完成后把回复写到这行的 reply_to）
+   - `TASK=<task>` + `TOPIC=<topic>`
+5. 父进程轮询 blackboard：`SELECT 1 FROM board WHERE id=$PARENT_ID AND reply_to IS NOT NULL LIMIT 1`，直到出现 reply 行；timeout 120s。
+6. 读出 reply 行的 payload，截断到 8000 字，返回给父 agent 的工具结果。
+
+子进程侧 `run_non_interactive()` 做：
+
+1. `switch_agent "$AGENT_NAME"`。
+2. **硬过滤**：从 tools JSON 里删除 `exec_command` 和 `agent_delegate` 两条；这是 `run_non_interactive` 内的代码，不是子 agent 的 system prompt 教它别用。
+3. 如果 `DELEGATION_DEPTH >= 2`，再往 system prompt 注入一段"Do not call `agent_delegate` in this context" 兜底。
+4. 用 `jj push` 构造 messages：`[{role:system, content:...}, {role:user, content:"$TASK\n\n(topic: $TOPIC)"}]`，`MAX_NON_INTERACTIVE_ITERS=5` 次内循环。
+5. 拿到 final assistant 消息，写一行 `reply_to=$PARENT_ID` 到 blackboard，`exit 0`；超时/出错写一行 `payload="[error] ..."` 然后 `exit 1`。
+
+**安全模型**：硬过滤在工具层，prompt 注入在模型层，纵深防御。两次都失败才会让子 agent 拿到 `exec_command`，概率极低。
+
+**深度上限**：`DELEGATION_DEPTH=0` 父级 → `1` 子级 → 第二次再 `agent_delegate` 时已经是 `2`，被脚本拦截。这意味着"父 → 子 → 孙子" 不可能，递归最多 2 层。
+
+**长度上限**：task ≤ 8000 字，reply ≤ 8000 字，120s 墙钟——避免长跑爆资源。
+
+### 13.7 coordinator 示例
+
+直接问 coordinator：
+
+```
+You> /agent coordinator
+You> 在当前目录里跑一次安全审计，结果写到 board 主题 audit-001
+```
+
+coordinator 内部大概这么走（实际由模型决策）：
+
+1. 调 `agent_list` 知道有哪些 persona。
+2. 调 `agent_delegate(agent="code-reviewer", task="列出 .data/ 和 tools/ 下的潜在安全风险",
+   topic="audit-001:review")` → 拿到 read-only review 结果。
+3. 调 `agent_delegate(agent="default", task="把 review 结果里的 BLOCKER 项汇总成 markdown",
+   topic="audit-001:summarize")` → 拿到 markdown 报告。
+4. 把最终报告通过 `board_write` 写到 `audit-001` 主题，reply_to 指向上一步。
+
+人侧可以 `/board audit-001` 看到完整时间线：`[code-reviewer 的发现] → [default 写的 markdown] → [coordinator 的总结]`。
+
+### 13.8 跨 agent 的 `/hist`
+
+`/hist all` 默认读当前 agent 的 DB（`$DB_PATH`）。要看别的 agent 的历史：
+
+```
+You> /hist
+You> /agent code-reviewer
+You> /hist all
+```
+
+——直接切过去看，没有 `/hist <agent>` 这种跨 agent 命令，避免一次性 SQL 跨多库带来的复杂度。
+
+### 13.9 写在最后
+
+整套多 agent 机制增加的主代码量大约 250 行，分布在 8 个新工具脚本和 `ai-agent.sh` 的几个函数里。设计原则和 v0.0.6 一脉相承：
+
+- **每个机制只做一件事**：`load_tools` 合并、blackboard 写、agent 委派，三件事分开。
+- **尽量复用现有基元**：委派其实就是"在 fork 的子进程里跑主脚本的 NON_INTERACTIVE 入口"，没造独立运行时。
+- **安全靠工具层，不靠 prompt**：基线 `exec_command` 和 `agent_delegate` 在子进程里直接被过滤，prompt 只能做兜底。
+
+如果你要扩展这套系统，建议先问三个问题：
+
+1. 新 agent 需要哪些基线工具之外的工具？（写 `agents/<name>/tools/`）
+2. 它需要和谁通信？走 blackboard 的哪个 topic？
+3. 它的输出需要回写还是直接返给调用方？
+
+回答清楚这三个问题，新 agent 接入通常 5 分钟内能完成。
+
+---
+
 ## 附录
 
 ### A. 函数参考
@@ -933,11 +1135,12 @@ ai-agent/
 
 ## 结语
 
-ai-agent.sh 是一个优雅的工程范例——用不到 400 行 Bash 脚本，实现了 AI Agent 的核心功能。它证明了：
+ai-agent.sh 是一个优雅的工程范例——用 ~780 行 Bash 脚本，实现了单 agent 工具调用与多 agent 编排两套机制。它证明了：
 
 1. **简单工具也能做出强大的东西** —— Bash + curl + sqlite3 + jq + jj，四个小工具的组合
 2. **Tool Calling 是 AI 落地的关键** —— 让 AI 不仅能说，还能做
-3. **透明即安全** —— 394 行代码，每一行都可审查、可理解、可修改
+3. **多 agent 协作不需要框架** —— 黑板 + persona 隔离 + 进程委派，~250 行新代码
+4. **透明即安全** —— 全部代码都在一个脚本里，每一行都可审查、可理解、可修改
 
 希望本书能帮助你掌握 ai-agent.sh，并激发你构建更强大的 AI 工具。
 
@@ -945,4 +1148,4 @@ Happy Hacking!
 
 ---
 
-*字数：约 15,000 字 | 完成于 2025 年*
+*字数：约 18,000 字 | 完成于 2026 年 6 月*

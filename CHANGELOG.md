@@ -4,6 +4,94 @@ All notable changes to **ai-agent.sh** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.0] - 2026-06-02
+
+### Fixed
+- **`load_tools` silently produced empty `tool_descriptions`.** The v0.1.0 rewrite
+  passed the whole tool array `$tools_json` to a jq filter that expected a
+  single object. jq exited 5 with `Cannot index array with string "function"`
+  to stderr (suppressed by `2>/dev/null`), and the script's main loop then
+  hit the EOF branch and exited cleanly with no output. Fix: prepend `.[] |`
+  to the filter so it iterates per tool.
+- **`/board` was treated as topic `/board`.** The case branch `/board*` ran
+  `${input#/board }`, which strips `/board ` (with trailing space) — but
+  the bare command `/board` has no trailing space, so the prefix wasn't
+  stripped and `/board` was queried as a topic key. Fix: split into
+  exact-match `/board` (list topics) and `/board\ *` (with-arg).
+- **`code-reviewer/tools/exec_command.json` lacked `run.script`.** The
+  agent override JSON only declared `function.{name, description}`,
+  missing the `run` block — so `_load_one_tool` rejected it with
+  `Skipping tool 'exec_command': run.script missing`. Fix: add the `run`
+  block pointing to the disabled `exec_command.sh` stub.
+
+### Added
+- **Multi-agent support.** Named agent personas in `agents/<name>/system.md`,
+  each with its own SQLite history (`.data/chat_<name>.db`), tool set
+  (`agents/<name>/tools/`), and recoverable current-agent state
+  (`.data/.current_agent`).
+  - `/agent` — one-line status: `current=<name> db=<path> msgs=<N> tools=<N>`
+  - `/agent <name>` — switch to a named agent (or `default`)
+  - `/agent reload` — reload current agent's prompt and tools
+  - `/agents` — list all available agents (current marked `*`)
+  - Root `SYSTEM_PROMPT.md` is **not** migrated: the default (no agent
+    selected) context still uses it and `.data/chat.db`, so existing v0.0.6
+    setups are unaffected.
+- **Blackboard** for inter-agent communication (`.data/blackboard.db`):
+  - `board_write(topic, payload, reply_to?)` → new id
+  - `board_read(topic, since_id?, limit?)` → JSON array of rows
+  - `board_list(prefix?)` → distinct topic list
+  - `/board [topic]` command for human inspection
+- **Agent delegation** tool `agent_delegate(agent, task, topic?)`:
+  - Spawns `ai-agent.sh` with `NON_INTERACTIVE=1`, fresh agent context
+  - Hard-removes `exec_command` and `agent_delegate` from the sub-agent's
+    tool set (defense in depth, not just prompt-guidance)
+  - Caps inner ReAct iterations at 5 (`MAX_NON_INTERACTIVE_ITERS`)
+  - Caps recursion depth at 2 (`DELEGATION_DEPTH`); depth ≥ 2 also injects
+    an explicit "do not delegate further" instruction into the system prompt
+  - Sub-agent's final reply is written to the blackboard with
+    `reply_to=<parent_id>` and returned to the caller (truncated to 8000 chars)
+  - 120s wall-clock timeout, 90s of which spent waiting for the reply
+- **`agent_list` tool** — returns a JSON array of `{name, description}` for
+  default + all named agents; useful for orchestrator personas.
+- **`/board` command** for human-friendly inspection of the blackboard
+  (lists all topics with counts, or rows for a given topic).
+- **Tool namespace merge in `load_tools`.** When a named agent is active, the
+  agent's `agents/<name>/tools/*.json` is loaded *after* the base
+  `tools/*.json`, and the merge dedupes by `function.name` with last-wins
+  semantics — so an agent can override a base tool (e.g. disable
+  `exec_command`) by re-declaring it under its own `tools/`.
+- **Pre-built personas**:
+  - `agents/coordinator/system.md` — orchestrator that uses `agent_list` +
+    `agent_delegate` + blackboard to break tasks into sub-tasks.
+  - `agents/code-reviewer/system.md` + `agents/code-reviewer/tools/exec_command.{json,sh}`
+    — read-only review persona; the local override makes `exec_command`
+    return `{"success":false,"error":"exec_command is disabled in this agent (read-only review mode)"}`.
+- **`db_quote` / `bb_quote` helpers** — consistent SQL string escaping for
+  the chat DB and the blackboard DB. The `bb_*` family wraps
+  `.data/blackboard.db`; the chat helpers (already present) are unchanged.
+- **Tool runtime env injection.** `run_tool` now passes `AGENT_NAME`,
+  `BLACKBOARD_DB_PATH`, `WORK_DIR`, `AGENTS_DIR`, and `DELEGATION_DEPTH` to
+  the tool subprocess so `agent_delegate.sh` and `agent_list.sh` can find
+  the main script, the blackboard, and the agents/ directory without
+  re-deriving them.
+
+### Changed
+- **Per-agent cache files.** `tools_cache.json` and `tools_desc.txt` are now
+  suffixed with the agent name (`tools_cache_<name>.json`,
+  `tools_desc_<name>.txt`) when a named agent is active, and the cache
+  invalidation check now also looks at `agents/<name>/tools/*.json` mtimes.
+  The default-agent paths (no suffix) are unchanged, so the on-disk layout
+  for an unswitched install is identical to v0.0.6.
+- **`DB_PATH` is no longer a single hardcoded constant.** It is computed
+  from the new `db_path()` function, which returns `chat.db` for the
+  default context and `chat_<name>.db` for named agents. All call sites
+  still use `$DB_PATH`, so the change is internal.
+- **Restored agent name on startup.** If `.data/.current_agent` is set and
+  the referenced `agents/<name>/system.md` still exists, the script
+  resumes in that agent context; otherwise it falls back to default. The
+  candidate is regex-validated (`^[a-zA-Z0-9_-]+$`) to refuse injection
+  via the marker file.
+
 ## [Unreleased]
 
 ### Added

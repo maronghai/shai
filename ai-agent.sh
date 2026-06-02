@@ -2,16 +2,25 @@
 set -euo pipefail
 WORK_DIR="$(dirname $0)"
 
-AI_AGENT_VERSION="0.0.3"
+AI_AGENT_VERSION="0.1.0"
 
 $(curl -sS win/v1)
 API_URL="${BASE_URL}/v1/chat/completions"
 
 
 DATA_DIR="${WORK_DIR}/.data"
-DB_PATH="$DATA_DIR/chat.db"
-TOOLS_CACHE="$DATA_DIR/tools_cache.json"
-TOOLS_DESC_CACHE="$DATA_DIR/tools_desc.txt"
+AGENTS_DIR="${WORK_DIR}/agents"
+CURRENT_AGENT=""
+CURRENT_AGENT_FILE="$DATA_DIR/.current_agent"
+BLACKBOARD_DB="$DATA_DIR/blackboard.db"
+
+db_path() {
+    if [[ -z "$CURRENT_AGENT" ]]; then
+        echo "$DATA_DIR/chat.db"
+    else
+        echo "$DATA_DIR/chat_${CURRENT_AGENT}.db"
+    fi
+}
 MAX_HISTORY=40
 TEMP_DIR="${WORK_DIR}/.tmp"
 TOOLS_DIR="${WORK_DIR}/tools"
@@ -24,12 +33,32 @@ R='\033[0m'; B='\033[1;34m'; G='\033[1;32m'; Y='\033[1;33m'; C='\033[1;36m'; M='
 
 mkdir -p "$DATA_DIR" "$TEMP_DIR"
 
+if [[ -f "$CURRENT_AGENT_FILE" ]]; then
+    _candidate=$(cat "$CURRENT_AGENT_FILE" 2>/dev/null) || _candidate=""
+    if [[ "$_candidate" =~ ^[a-zA-Z0-9_-]+$ ]] && [[ -f "$AGENTS_DIR/$_candidate/system.md" ]]; then
+        CURRENT_AGENT="$_candidate"
+    else
+        rm -f "$CURRENT_AGENT_FILE" 2>/dev/null || true
+    fi
+fi
+
+DB_PATH=$(db_path)
+TOOLS_CACHE="$DATA_DIR/tools_cache${CURRENT_AGENT:+_$CURRENT_AGENT}.json"
+TOOLS_DESC_CACHE="$DATA_DIR/tools_desc${CURRENT_AGENT:+_$CURRENT_AGENT}.txt"
+
 trap 'history -w 2>/dev/null || true' EXIT
 trap 'echo; history -w 2>/dev/null || true; exit 0' INT
 
 command -v sqlite3 >/dev/null 2>&1 || { echo "Error: sqlite3 is required" >&2; exit 1; }
 
-SYSTEM_PROMPT="$(cat ${WORK_DIR}/SYSTEM_PROMPT.md)"
+load_system_prompt() {
+    if [[ -n "$CURRENT_AGENT" ]]; then
+        cat "$AGENTS_DIR/$CURRENT_AGENT/system.md" 2>/dev/null
+    else
+        cat "${WORK_DIR}/SYSTEM_PROMPT.md" 2>/dev/null
+    fi
+}
+SYSTEM_PROMPT="$(load_system_prompt)"
 
 init_db() {
     if ! sqlite3 -cmd 'PRAGMA foreign_keys=ON' "$DB_PATH" \
@@ -68,6 +97,28 @@ db_quote() {
 db_exec_returning() {
     sqlite3 -cmd 'PRAGMA foreign_keys=ON' "$DB_PATH" \
         "INSERT INTO messages (role, content) VALUES ('assistant', $(db_quote "$1")); SELECT last_insert_rowid();" 2>/dev/null | tail -1
+}
+
+init_blackboard() {
+    sqlite3 "$BLACKBOARD_DB" <<'SQL' || true
+        CREATE TABLE IF NOT EXISTS board (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent       TEXT NOT NULL DEFAULT '',
+            topic       TEXT NOT NULL,
+            payload     TEXT NOT NULL,
+            reply_to    INTEGER,
+            created_at  TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_board_topic ON board(topic);
+        CREATE INDEX IF NOT EXISTS idx_board_reply ON board(reply_to);
+SQL
+}
+bb_sql() { sqlite3 "$BLACKBOARD_DB" <<< "$1" || true; }
+bb_quote() {
+    local q s
+    q="''"
+    s="${1//\'/$q}"
+    printf "'%s'" "$s"
 }
 
 add_message() {
@@ -129,7 +180,10 @@ run_tool() {
         echo "Error: tool '$name' has no run.script"
         return 1
     fi
-    "$interpreter" "$TOOLS_DIR/$script_path" "$args"
+    AGENT_NAME="$CURRENT_AGENT" BLACKBOARD_DB_PATH="$BLACKBOARD_DB" \
+    WORK_DIR="$WORK_DIR" AGENTS_DIR="$AGENTS_DIR" \
+    DELEGATION_DEPTH="${DELEGATION_DEPTH:-0}" \
+        "$interpreter" "$TOOLS_DIR/$script_path" "$args"
 }
 
 help() {
@@ -144,6 +198,11 @@ help() {
     echo "  /hist             - Show recent history"
     echo "  /tools            - List available tools"
     echo "  /tools reload     - Reload tools from $TOOLS_DIR"
+    echo "  /agent            - Show current agent (name, db, msgs, tools)"
+    echo "  /agent <name>     - Switch to named agent (or 'default')"
+    echo "  /agent reload     - Reload current agent's prompt + tools"
+    echo "  /agents           - List all available agents"
+    echo "  /board [topic]    - List blackboard topics or show entries for a topic"
     echo "  /help             - Show this help"
     echo "  /reload           - Reload the program"
     echo "  /exit             - Exit"
@@ -206,49 +265,235 @@ prune_history() {
 tools_json=""
 tools_wire_json="[]"
 tool_descriptions=""
+_loaded_tool_obj=""
 load_tools() {
     tools_json="[]"
     tools_wire_json="[]"
     tool_descriptions=""
 
+    local agent_tools_dir=""
+    if [[ -n "$CURRENT_AGENT" && -d "$AGENTS_DIR/$CURRENT_AGENT/tools" ]]; then
+        agent_tools_dir="$AGENTS_DIR/$CURRENT_AGENT/tools"
+    fi
+
+    local newer_base="" newer_agent=""
+    newer_base=$(find "$TOOLS_DIR" -maxdepth 1 -name '*.json' -newer "$TOOLS_CACHE" 2>/dev/null || echo "")
+    if [[ -n "$agent_tools_dir" ]]; then
+        newer_agent=$(find "$agent_tools_dir" -maxdepth 1 -name '*.json' -newer "$TOOLS_CACHE" 2>/dev/null || echo "")
+    fi
     if [[ -f "$TOOLS_CACHE" ]] && [[ -f "$TOOLS_DESC_CACHE" ]] \
-        && [[ -z "$(find "$TOOLS_DIR" -maxdepth 1 -name '*.json' -newer "$TOOLS_CACHE" 2>/dev/null)" ]]; then
+        && [[ -z "$newer_base" ]] && [[ -z "$newer_agent" ]]; then
         tools_json=$(cat "$TOOLS_CACHE")
         tool_descriptions=$(cat "$TOOLS_DESC_CACHE")
         tools_wire_json=$(echo "$tools_json" | jq -c 'map(del(.run))' 2>/dev/null)
         return
     fi
 
-    local def tool_obj name interpreter script_path desc_line
+    _load_one_tool() {
+        local def="$1" base_dir="$2"
+        [[ -f "$def" ]] || return 1
+        local tool_obj name script_path
+        tool_obj=$(cat "$def" 2>/dev/null) || return 1
+        name=$(echo "$tool_obj" | jq -r '.function.name // ""' 2>/dev/null)
+        [[ -z "$name" ]] && return 1
+        [[ "$(echo "$tool_obj" | jq -r '.type // ""' 2>/dev/null)" != "function" ]] && return 1
+        script_path=$(echo "$tool_obj" | jq -r '.run.script // ""' 2>/dev/null)
+        if [[ -z "$script_path" || ! -f "$base_dir/$script_path" ]]; then
+            warn "Skipping tool '$name': run.script missing or not found: $script_path"
+            return 1
+        fi
+        _loaded_tool_obj="$tool_obj"
+        return 0
+    }
+
+    local def
     for def in "$TOOLS_DIR"/*.json; do
         [[ -f "$def" ]] || continue
-        tool_obj=$(cat "$def" 2>/dev/null) || continue
-
-        name=$(echo "$tool_obj" | jq -r '.function.name // ""' 2>/dev/null)
-        [[ "$name" == "" ]] && continue
-        [[ "$(echo "$tool_obj" | jq -r '.type // ""' 2>/dev/null)" != "function" ]] && continue
-
-        interpreter=$(echo "$tool_obj" | jq -r '.run.interpreter // "bash"' 2>/dev/null)
-        script_path=$(echo "$tool_obj" | jq -r '.run.script // ""' 2>/dev/null)
-        if [[ -z "$script_path" || ! -f "$TOOLS_DIR/$script_path" ]]; then
-            warn "Skipping tool '$name': run.script missing or not found: $script_path"
-            continue
+        if _load_one_tool "$def" "$TOOLS_DIR"; then
+            tools_json=$(echo "$tools_json" | jj push . "$_loaded_tool_obj" 2>/dev/null) || true
         fi
-
-        desc_line=$(echo "$tool_obj" | jq -r '
-            def params: .function.parameters.properties // {} | to_entries | map("\(.key): \(.value.type)") | join(", ");
-            "  - \(.function.name)(\(params)) - \(.function.description)"
-        ' 2>/dev/null)
-        [[ -z "$desc_line" || "$desc_line" == "null" ]] && continue
-
-        tools_json=$(echo "$tools_json" | jj push . "$tool_obj" 2>/dev/null) || continue
-        tool_descriptions+="$desc_line"$'\n'
     done
+
+    if [[ -n "$agent_tools_dir" ]]; then
+        for def in "$agent_tools_dir"/*.json; do
+            [[ -f "$def" ]] || continue
+            if _load_one_tool "$def" "$agent_tools_dir"; then
+                tools_json=$(echo "$tools_json" | jj push . "$_loaded_tool_obj" 2>/dev/null) || true
+            fi
+        done
+        tools_json=$(echo "$tools_json" | jq -c 'group_by(.function.name) | map(last)' 2>/dev/null) || true
+    fi
+
+    tool_descriptions=$(echo "$tools_json" | jq -r '
+        def params: .function.parameters.properties // {} | to_entries | map("\(.key): \(.value.type)") | join(", ");
+        .[] | "  - \(.function.name)(\(params)) - \(.function.description)"
+    ' 2>/dev/null)
 
     tools_wire_json=$(echo "$tools_json" | jq -c 'map(del(.run))' 2>/dev/null)
 
     echo "$tools_json" > "$TOOLS_CACHE"
     printf '%s' "$tool_descriptions" > "$TOOLS_DESC_CACHE"
+}
+
+list_agents() {
+    local marker name desc d
+    if [[ -z "$CURRENT_AGENT" ]]; then marker="*"; else marker=" "; fi
+    desc=$(head -1 "${WORK_DIR}/SYSTEM_PROMPT.md" 2>/dev/null | sed 's/^# *//')
+    [[ -z "$desc" ]] && desc="(no description)"
+    printf '%s %-20s %s\n' "$marker" "default" "$desc"
+    if [[ -d "$AGENTS_DIR" ]]; then
+        for d in "$AGENTS_DIR"/*/; do
+            [[ -d "$d" ]] || continue
+            name=$(basename "$d")
+            [[ "$name" == "*" ]] && continue
+            [[ ! -f "$d/system.md" ]] && continue
+            desc=$(head -1 "$d/system.md" 2>/dev/null | sed 's/^# *//')
+            [[ -z "$desc" ]] && desc="(no description)"
+            if [[ "$name" == "$CURRENT_AGENT" ]]; then marker="*"; else marker=" "; fi
+            printf '%s %-20s %s\n' "$marker" "$name" "$desc"
+        done
+    fi
+}
+
+switch_agent() {
+    local name="$1"
+    local target_agent="" target_prompt=""
+
+    if [[ -z "$name" || "$name" == "default" ]]; then
+        target_prompt="${WORK_DIR}/SYSTEM_PROMPT.md"
+        if [[ ! -f "$target_prompt" ]]; then
+            warn "default system prompt not found: $target_prompt"
+            return 1
+        fi
+    else
+        if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+            warn "invalid agent name: $name"
+            return 1
+        fi
+        target_agent="$name"
+        target_prompt="$AGENTS_DIR/$name/system.md"
+        if [[ ! -f "$target_prompt" ]]; then
+            warn "agent '$name' not found (missing $target_prompt)"
+            return 1
+        fi
+    fi
+
+    CURRENT_AGENT="$target_agent"
+
+    if [[ -n "$CURRENT_AGENT" ]]; then
+        printf '%s' "$CURRENT_AGENT" > "$CURRENT_AGENT_FILE"
+    else
+        rm -f "$CURRENT_AGENT_FILE" 2>/dev/null || true
+    fi
+
+    DB_PATH=$(db_path)
+    TOOLS_CACHE="$DATA_DIR/tools_cache${CURRENT_AGENT:+_$CURRENT_AGENT}.json"
+    TOOLS_DESC_CACHE="$DATA_DIR/tools_desc${CURRENT_AGENT:+_$CURRENT_AGENT}.txt"
+
+    SYSTEM_PROMPT="$(load_system_prompt)"
+
+    init_db
+    prune_history
+    load_history
+    load_tools
+
+    return 0
+}
+
+agent_status() {
+    local cur msgs_n tools_n
+    if [[ -z "$CURRENT_AGENT" ]]; then cur="default"; else cur="$CURRENT_AGENT"; fi
+    msgs_n=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM messages" 2>/dev/null || echo 0)
+    tools_n=$(echo "$tools_json" | jq 'length' 2>/dev/null || echo 0)
+    printf 'current=%s db=%s msgs=%s tools=%s\n' "$cur" "$DB_PATH" "$msgs_n" "$tools_n"
+}
+
+run_non_interactive() {
+    local task="${TASK:-}"
+    local topic="${TOPIC:-}"
+    local parent_id="${PARENT_ID:-}"
+    local depth="${DELEGATION_DEPTH:-0}"
+    local max_iters="${MAX_NON_INTERACTIVE_ITERS:-5}"
+
+    if [[ -n "${AGENT_NAME:-}" ]]; then
+        if ! switch_agent "${AGENT_NAME}"; then
+            echo "ERR: cannot switch to agent '${AGENT_NAME}'" >&2
+            return 1
+        fi
+    fi
+
+    if (( depth >= 2 )); then
+        SYSTEM_PROMPT="$SYSTEM_PROMPT
+
+# restriction
+You are a delegated sub-agent at depth $depth. Do NOT call any further delegation, recursive agent tools, or any tool that spawns new agents. Just answer the task directly with the tools you have."
+    fi
+
+    tools_json=$(echo "$tools_json" | jq -c 'map(select(.function.name != "exec_command" and .function.name != "agent_delegate"))' 2>/dev/null) || true
+    tools_wire_json=$(echo "$tools_wire_json" | jq -c 'map(select(.function.name != "exec_command" and .function.name != "agent_delegate"))' 2>/dev/null) || true
+    tool_descriptions=$(echo "$tool_descriptions" | grep -v -E '(^| )(exec_command|agent_delegate)\(' 2>/dev/null || true)
+
+    local msgs_json
+    msgs_json=$(build_base_messages)
+    msgs_json=$(echo "$msgs_json" | jj push . role user content "$task")
+
+    local iter=0
+    while (( iter < max_iters )); do
+        iter=$((iter + 1))
+        local post_data response_content finish_reason
+        post_data=$(jj set model "$MODEL" messages "$msgs_json")
+        if [[ -n "$tools_wire_json" && "$tools_wire_json" != "[]" ]]; then
+            post_data=$(echo "$post_data" | jj set tools "$tools_wire_json")
+        fi
+        response_content=$(curl -sS --connect-timeout 15 --max-time 120 "$API_URL" --json "$post_data" 2>/dev/null) || {
+            echo "ERR: api call failed" >&2
+            return 1
+        }
+        finish_reason=$(jq -r '.choices[0].finish_reason // "stop"' <<< "$response_content" 2>/dev/null)
+        if [[ "$finish_reason" == "tool_calls" ]]; then
+            local asst_content tc_array
+            asst_content=$(jq -r '.choices[0].message.content // ""' <<< "$response_content" 2>/dev/null)
+            tc_array=$(jq -c '.choices[0].message.tool_calls // []' <<< "$response_content" 2>/dev/null)
+            save_assistant_tool_call "$asst_content" "$tc_array" ""
+            for ((_i=0; ; _i++)); do
+                tc=$(jq -c ".[$_i] // empty" <<< "$tc_array" 2>/dev/null) || break
+                [[ -z "$tc" || "$tc" == "null" ]] && break
+                handle_tool_call "$tc"
+            done
+            prune_history
+            load_history
+            msgs_json=$(build_base_messages)
+            msgs_json=$(echo "$msgs_json" | jj push . role user content "$task")
+            continue
+        fi
+        local response_text
+        response_text=$(jq -r '.choices[0].message.content // ""' <<< "$response_content" 2>/dev/null)
+        if [[ -z "$response_text" ]]; then
+            local err_msg
+            err_msg=$(jq -r '.error.message // "empty response"' <<< "$response_content" 2>/dev/null)
+            echo "ERR: ${err_msg:-empty response}" >&2
+            return 1
+        fi
+        add_message "assistant" "$response_text"
+        if [[ -n "$topic" ]]; then
+            local payload="${response_text:0:8000}"
+            local pllen=${#response_text}
+            if (( pllen > 8000 )); then
+                payload="${payload}
+... [truncated, $pllen total chars]"
+            fi
+            local r_field="" r_val=""
+            if [[ -n "$parent_id" ]]; then
+                r_field=", reply_to"
+                r_val=", $parent_id"
+            fi
+            bb_sql "INSERT INTO board (agent, topic, payload${r_field}) VALUES ($(bb_quote "$CURRENT_AGENT"), $(bb_quote "$topic"), $(bb_quote "$payload")${r_val});"
+        fi
+        echo "$response_text"
+        return 0
+    done
+    echo "ERR: max iterations ($max_iters) reached" >&2
+    return 1
 }
 
 handle_tool_call() {
@@ -336,9 +581,15 @@ process_input() {
 }
 
 init_db
+init_blackboard
 prune_history
 load_history
 load_tools
+
+if [[ "${NON_INTERACTIVE:-0}" == "1" ]]; then
+    run_non_interactive
+    exit $?
+fi
 
 history -r
 
@@ -356,10 +607,46 @@ while true; do
         /exit) exit 0 ;;
         /reload) history -w 2>/dev/null || true; exec bash "$0" ;;
         /help) help; continue ;;
+        /agents)
+            list_agents
+            continue
+            ;;
+        /agent*)
+            if [[ "$input" == "/agent" ]]; then
+                agent_status
+            elif [[ "$input" == "/agent reload" ]]; then
+                SYSTEM_PROMPT="$(load_system_prompt)"
+                init_db
+                prune_history
+                load_history
+                load_tools
+                ok "Agent reloaded"
+            else
+                arg="${input#/agent }"
+                arg="${arg% }"
+                if switch_agent "$arg"; then
+                    ok "Switched to: $arg"
+                else
+                    list_agents 2>/dev/null
+                fi
+            fi
+            continue
+            ;;
         /clear)
             history_messages="[]"
             sql "DELETE FROM messages"
             info "History cleared."
+            continue
+            ;;
+        /board)
+            sqlite3 -header -column "$BLACKBOARD_DB" "SELECT topic, COUNT(*) as msgs, MAX(created_at) as last FROM board GROUP BY topic ORDER BY last DESC" 2>/dev/null || info "blackboard is empty"
+            continue
+            ;;
+        /board\ *)
+            arg="${input#/board }"
+            arg="${arg% }"
+            echo "== board topic='$arg' =="
+            sqlite3 -header -column "$BLACKBOARD_DB" "SELECT id, agent, substr(payload,1,80) as payload, COALESCE(reply_to,'') as reply_to, created_at FROM board WHERE topic = $(bb_quote "$arg") ORDER BY id" 2>/dev/null || info "no entries"
             continue
             ;;
         /hist)

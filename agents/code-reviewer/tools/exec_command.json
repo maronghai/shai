@@ -1,0 +1,11 @@
+{
+  "type": "function",
+  "function": {
+    "name": "exec_command",
+    "description": "DISABLED in the code-reviewer agent. This stub always returns an error."
+  },
+  "run": {
+    "interpreter": "bash",
+    "script": "exec_command.sh"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "type": "function",
+  "function": {
+    "name": "board_list",
+    "description": "List distinct topics on the blackboard, optionally filtered by prefix. Returns a JSON array of topic strings.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "prefix": {
+          "type": "string",
+          "description": "Optional topic prefix to filter by (e.g. 'review-' to list all review topics)"
+        }
+      }
+    }
+  },
+  "run": {
+    "interpreter": "bash",
+    "script": "board_list.sh"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "type": "function",
+  "function": {
+    "name": "agent_delegate",
+    "description": "Delegate a task to another named agent (defined under agents/<name>/system.md). The sub-agent runs in a separate process with NON_INTERACTIVE=1, with exec_command and agent_delegate hard-removed from its toolset, and a max iteration cap. The sub-agent's final reply is returned. Maximum delegation depth is 2.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "agent": {
+          "type": "string",
+          "description": "Name of the target agent (must match agents/<name>/system.md)"
+        },
+        "task": {
+          "type": "string",
+          "description": "The task description / prompt to send to the target agent"
+        },
+        "topic": {
+          "type": "string",
+          "description": "Optional blackboard topic key (auto-generated if omitted)"
+        }
+      },
+      "required": ["agent", "task"]
+    }
+  },
+  "run": {
+    "interpreter": "bash",
+    "script": "agent_delegate.sh"
+  }
+}

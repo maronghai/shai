@@ -1,0 +1,29 @@
+{
+  "type": "function",
+  "function": {
+    "name": "board_write",
+    "description": "Write an entry to the shared blackboard SQLite database for cross-agent communication. Returns the new entry id.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "topic": {
+          "type": "string",
+          "description": "Topic key to group related entries (e.g. 'review-001', 'plan', 'finding-x')"
+        },
+        "payload": {
+          "type": "string",
+          "description": "Content to write (free-form text or JSON string; will be stored verbatim)"
+        },
+        "reply_to": {
+          "type": "integer",
+          "description": "Optional id of an existing board entry this is replying to (creates a thread)"
+        }
+      },
+      "required": ["topic", "payload"]
+    }
+  },
+  "run": {
+    "interpreter": "bash",
+    "script": "board_write.sh"
+  }
+}

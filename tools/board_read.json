@@ -1,0 +1,29 @@
+{
+  "type": "function",
+  "function": {
+    "name": "board_read",
+    "description": "Read entries from the shared blackboard for a given topic, optionally starting after a known id. Returns a JSON array.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "topic": {
+          "type": "string",
+          "description": "Topic key to read"
+        },
+        "since_id": {
+          "type": "integer",
+          "description": "Only return entries with id strictly greater than this (default 0)"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Max number of entries to return (default 50, max 500)"
+        }
+      },
+      "required": ["topic"]
+    }
+  },
+  "run": {
+    "interpreter": "bash",
+    "script": "board_read.sh"
+  }
+}
