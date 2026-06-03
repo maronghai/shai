@@ -1,6 +1,6 @@
 # ai-agent.sh
 
-> An AI Agent terminal client in ~780 lines of Bash (v0.1.0). Talks to any OpenAI-compatible API,
+> An AI Agent terminal client in ~1330 lines of Bash (v0.0.14). Talks to any OpenAI-compatible API,
 > drives a ReAct loop with hot-pluggable tools, and remembers your conversation in SQLite.
 
 > **Note on the repo name `zig-cos`:** this is a historical name �?the project is a
@@ -44,7 +44,7 @@ Type `/help` to see all commands.
 ## Repository Layout
 
 ```
-ai-agent.sh          Main script (v0.1.0, ~780 lines)
+ai-agent.sh          Main script (v0.0.14, ~1330 lines)
 agents/              Named agent personas (system.md + tools/) [optional]
 SYSTEM_PROMPT.md     Default / "no agent selected" system prompt
 SYSTEM_PROMPT.md     System prompt
@@ -55,13 +55,28 @@ CHANGELOG.md         Version history
 .editorconfig        Editor defaults
 .shellcheckrc        shellcheck config
 tools/               Tool definitions (JSON is the full OpenAI spec; `.sh` bound via `run.script`)
-.data/               Runtime data (SQLite, cache, history) �?gitignored
-.tmp/                Runtime temp files �?gitignored
+team/                AI Coding Team schema (v0.0.14+; `schema.sql` for `.data/team.db`)
+tests/               LLM-free test suite (21 groups, 96 sub-assertions)
+.data/               Runtime data (SQLite, cache, history) — gitignored
+.tmp/                Runtime temp files — gitignored
 ```
 
 For a deep dive read **[book.md](./book.md)**. It walks through every feature,
 the database schema, the ReAct loop, the tool spec format, and how to
 extend with custom tools.
+
+## Testing
+
+```bash
+bash tests/test.sh    # 21 groups, 96 sub-assertions, no LLM required
+```
+
+The suite covers tool manifest validity, script syntax, REPL command
+wiring, blackboard roundtrips, the task queue, persona dispatch, and the
+`/team` workflow. It is **LLM-free** — the live ReAct loop with a real
+model is covered by the end-to-end demo trace in
+[book.md §14.9](./book.md#149-端到端-demo-跟踪). See
+[tests/README.md](./tests/README.md) for the full breakdown.
 
 ## Adding a Tool
 
@@ -191,6 +206,92 @@ Pre-built personas:
 
 See [book.md chapter 13](./book.md#13-章多-agent-编排) for the full protocol,
 blackboard schema, and delegation safety model.
+
+## AI Coding Team (v0.0.14+)
+
+On top of the multi-agent layer, `/team` adds a **persistent task queue**
+(`.data/team.db`) and a **dispatch loop** — `/team start` delegates the
+goal to the PM, who breaks it into tasks; `/team next` serially dispatches
+each ready task to its persona until all are `done`.
+
+### 7 personas
+
+| Role | Tag | Job |
+|---|---|---|
+| `pm` | `type:pm` | break goals, write specs, prioritize |
+| `architect` | `type:design` | contracts, schema, test plan |
+| `developer` | `type:code` | implement + minimal tests |
+| `tester` | `type:test` | black-box verify, do not trust |
+| `code-reviewer` | `type:review` | read-only review (5 categories) |
+| `docs` | `type:docs` | sync README / book.md / CHANGELOG |
+| `coordinator` | `type:meta` | orchestrator; also owns `meta` tasks |
+
+### Task commands
+
+| Command | Effect |
+|---|---|
+| `/tasks` | Group counts by status |
+| `/tasks <status>` | List tasks of one status |
+| `/tasks ready` | List dispatchable tasks (deps all `done`) |
+| `/task <id>` | One task + its event log |
+| `/team` (= `status`) | Current goal + task breakdown + next preview |
+| `/team start <goal>` | Set goal + delegate PM to break it down |
+| `/team next` | Dispatch the next ready task |
+| `/team stop` | Clear goal (keep task history) |
+| `/team clear [-y]` | Soft cancel: non-done → `cancelled` + clear goal |
+
+### Task tools
+
+`task_create` / `task_list` / `task_claim` / `task_update` / `task_done` /
+`task_show` (persisted in `.data/team.db`; schema in `team/schema.sql`).
+
+### Dispatch loop
+
+```
+                        /team start <goal>
+                                │
+                                ▼
+              ┌──── write team_state.current_goal ────┐
+              │                                        │
+              ▼                                        │
+         create 1 spec task                            │
+              │                                        │
+              ▼                                        │
+         delegate PM ──task_create()──> N design /      │
+              │                       code / review /  │
+              ▼                       test / docs      │
+         mark spec task done                           │
+                                                       
+   ╔══════ /team next loop (manual-but-scripted) ═════╗
+   ║ task_list ready limit=1                              ║
+   ║     │                                                ║
+   ║     ▼                                                ║
+   ║ _team_agent_for_type ──> agent name                  ║
+   ║     │                                                ║
+   ║     ▼                                                ║
+   ║ task_claim(id)                                       ║
+   ║     │                                                ║
+   ║     ▼                                                ║
+   ║ agent_delegate(agent, task, topic)                   ║
+   ║     │                                                ║
+   ║     ├── ok ──> read board reply ──> task_done(id,    ║
+   ║     │                       result)                  ║
+   ║     │                                                ║
+   ║     └── 300s timeout / parse error ──> task_done(    ║
+   ║                               id, stub)             ║
+   ║                                                      ║
+   ║ Loop back: pick the next ready task. When all done,  ║
+   ║ print "all tasks done. /team stop to clear goal."    ║
+   ╚══════════════════════════════════════════════════════╝
+```
+
+Dispatch is **serial** — one `/team next` runs one task. This is
+intentional: easy to debug, idempotent (`task_claim` is `WHERE status='ready'`),
+and avoids LLM rate-limit storms. To go full-speed, see
+[book.md §14.6](./book.md#146-manual-but-scripted-编排风格).
+
+Full design, schema, 6 task tools, 6 new personas, and an end-to-end demo
+trace live in [book.md chapter 14](./book.md#第-14-章ai-coding-team).
 
 ## Security Notice
 

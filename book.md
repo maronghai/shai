@@ -4,7 +4,7 @@
 
 在人工智能飞速发展的今天，AI 编程助手已成为开发者离不开的工具。但大多数 AI 助手只停留在"问答"层面，无法真正操作你的代码库、执行命令或读取文件。
 
-**ai-agent.sh** 打破了这个局限——它仅用 ~780 行 Bash 脚本（v0.1.0），就构建了一个完整的 AI Agent 终端环境。它连接任何 OpenAI 兼容的 API，让你的终端变成一个**能读、能搜、能执行、能自主调用工具**，并且**支持多 agent 切换与委派**的智能代理。
+**ai-agent.sh** 打破了这个局限——它仅用 ~1330 行 Bash 脚本（v0.0.14），就构建了一个完整的 AI Agent 终端环境。它连接任何 OpenAI 兼容的 API，让你的终端变成一个**能读、能搜、能执行、能自主调用工具**，并且**支持多 agent 切换、委派和 7 人 AI Coding Team 编排**的智能代理。
 
 本书将带你从零开始，全面掌握 ai-agent.sh 的使用、原理与扩展。
 
@@ -20,7 +20,7 @@ ai-agent.sh 是一个基于 Bash 脚本的 AI Agent 终端程序，它：
 - 在终端中提供交互式对话界面
 - 支持 **工具调用**（Tool Calling）：读取文件、搜索代码、执行命令
 - 使用 **SQLite** 持久化对话历史
-- 所有功能封装在 **单个脚本文件**（~780 行，含多 agent 支持）中
+- 所有功能封装在 **单个脚本文件**（~1330 行，含多 agent 与 AI Coding Team 编排）中
 
 ### 1.2 核心特性
 
@@ -1194,7 +1194,7 @@ You> /hist full 114     # 单条（_hist_full 风格）：id=114 的 `--- #id ro
 3. **派发循环**：coordinator 反复做"找下一个 ready 任务 → 派给对应
    agent → 等 reply → 标 done"这件事，直到所有任务完成。
 
-v0.2.0 加进来的就是这三件：`.data/team.db`（任务队列 + 状态机）+ 6 个
+v0.0.14 加进来的就是这三件：`.data/team.db`（任务队列 + 状态机）+ 6 个
 task 工具（CRUD 接口）+ 4 个 `/team` 子命令（派发循环）。
 
 ### 14.2 任务表 schema
@@ -1369,7 +1369,7 @@ IF NOT EXISTS`）。
 
 如果以后需要"全速派发"，最简单的扩展是把 `/team next` 加一个
 `/team next all` 子命令，循环里 `task_claim` + `agent_delegate &`
-后端跑。当前 v0.2.0 不带——保持**简单能跑**。
+后端跑。当前 v0.0.14 不带——保持**简单能跑**。
 
 ### 14.7 type→agent 映射
 
@@ -1533,6 +1533,19 @@ code-reviewer / docs / coordinator 七人团队，能在 zig-cos 自身上把
 外加一条：**自驱用 DB 队列，不用内存消息**——session 没了任务还在，
 明天起来 `/team next` 继续派。
 
+### 14.12 测试套件
+
+21 组、96 项断言的 LLM-free 套件入仓在 `tests/test.sh`（`tests/README.md`
+有完整说明）。覆盖：工具 manifest JSON / `.sh` 语法 / REPL 命令接线 /
+blackboard roundtrip / task 队列 / 7 个 persona 切换 / `/team` 工作流。
+跑：
+
+```bash
+bash tests/test.sh    # 或 ./tests/test.sh（已 chmod +x）
+```
+
+**不**测的：真实 ReAct 循环（要 LLM 后端）—— 那是 §14.9 demo 的范围。
+
 ---
 
 ## 附录
@@ -1584,7 +1597,7 @@ ai-agent/
 
 ## 结语
 
-ai-agent.sh 是一个优雅的工程范例——用 ~780 行 Bash 脚本，实现了单 agent 工具调用与多 agent 编排两套机制。它证明了：
+ai-agent.sh 是一个优雅的工程范例——用 ~1330 行 Bash 脚本，实现了单 agent 工具调用、多 agent 编排、以及 7 人 AI Coding Team 任务派发三套机制。它证明了：
 
 1. **简单工具也能做出强大的东西** —— Bash + curl + sqlite3 + jq + jj，四个小工具的组合
 2. **Tool Calling 是 AI 落地的关键** —— 让 AI 不仅能说，还能做

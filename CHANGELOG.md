@@ -133,7 +133,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   candidate is regex-validated (`^[a-zA-Z0-9_-]+$`) to refuse injection
   via the marker file.
 
-## [0.2.0] - 2026-06-03
+## [0.0.14] - 2026-06-03
 
 ### Added
 - **Task system** (`.data/team.db`): a persistent work queue that the
