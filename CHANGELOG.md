@@ -133,6 +133,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   candidate is regex-validated (`^[a-zA-Z0-9_-]+$`) to refuse injection
   via the marker file.
 
+## [0.2.0] - 2026-06-03
+
+### Added
+- **Task system** (`.data/team.db`): a persistent work queue that the
+  coordinator can populate and dispatch from, modelled after the
+  blackboard's SQLite backbone.
+  - `team/schema.sql` defines `tasks` (id, type, status, title, description,
+    depends_on, assigned_to, created_at, updated_at), `task_events`
+    (audit trail of every status transition with agent + timestamp), and
+    `team_state` (a tiny key/value table for the current goal).
+  - 6 task tools: `task_create` / `task_list` / `task_claim` / `task_update` /
+    `task_done` / `task_show`. `task_list` supports `status=ready` filtering
+    via a `LIKE '%,<id>,%'` + `NOT EXISTS` subquery that walks `depends_on`
+    and excludes any task whose dependency is still pending or claimed.
+  - REPL commands: `/tasks` (grouped counts by status), `/tasks <status>`
+    (rows for a given status), `/tasks ready` (the actionable queue),
+    `/task <id>` (full task detail incl. events).
+  - `task_show` builds its JSON output field-by-field via `jq -Rsr '@json'`
+    so titles / descriptions with embedded quotes, newlines, or NULs
+    round-trip through SQLite intact.
+- **`/team` workflow** for end-to-end orchestration:
+  - `/team` (= `/team status`) — current goal, task counts by status,
+    next-ready preview.
+  - `/team start <goal>` — writes `team_state.current_goal` + `current_goal_id`,
+    creates a `spec` task, delegates to the **PM** agent (via
+    `agent_delegate`) to break the goal into sub-tasks, and marks the
+    spec task `done` once the PM writes its board reply.
+  - `/team next` — finds the next `ready=1` task, resolves the agent via
+    `_team_agent_for_type` (spec→pm, design→architect, code→developer,
+    review→code-reviewer, test→tester, docs→docs, meta→coordinator),
+    claims it (so no two runs collide), delegates to that agent with the
+    task title + description, waits for the board reply, then marks the
+    task `done` (coordinator can mark on behalf of any agent).
+  - `/team stop` — clears `current_goal` and `current_goal_id` (does not
+    delete tasks; the audit trail stays).
+  - `/team clear` — wipes `tasks` + `task_events` + `team_state` and resets
+    `sqlite_sequence`, so the queue is back to a fresh state. Idempotent
+    on an empty db (prints `team already empty`). Destructive — different
+    from `/team stop` in that the audit trail is also dropped.
+  - **Fallback safety**: if the delegated agent never writes a board
+    reply (e.g. the LLM hit a parse error mid-iteration), `/team next`
+    still marks the task `done` with a `(no board reply from <agent>)`
+    stub so dependent tasks can move forward instead of deadlocking.
+- **6 pre-built personas** under `agents/<role>/system.md`, each tagged
+  with `type:<role>` for tag-filter visibility:
+  - `pm` (spec / planning) — clarify goals, write specs, prioritize work.
+  - `architect` (design) — design before code; output contract, schema,
+    test plan.
+  - `developer` (code) — make the change work; write minimal code + tests.
+  - `tester` (test) — verify, don't trust; black-box the change.
+  - `code-reviewer` (review, read-only) — already in v0.1.0; final guard.
+  - `docs` (docs) — keep README / book / CHANGELOG in sync.
+  - `coordinator` (orchestration) — the existing v0.1.0 persona, now also
+    type:meta so it can own `meta` tasks when needed.
+- **`SYSTEM_PROMPT.md` rewrite** (61 lines, 5 sections). The v0.1.0 prompt
+  was 30+ bullet items and confused the model about the difference between
+  "/shell ls" (literal text the user typed) and "actually run ls". The
+  rewrite: (1) 5-section structure with clear role → 7 hard rules →
+  tool rules → command reference → meta, (2) `_agent_prompt` color bug
+  fix (`printf '%s'` → `'%b'` so `\e[...]` escape sequences in the agent
+  name actually render).
+
+### Fixed
+- **dash `echo` interpreted `\n` escapes.** All 10 tool scripts had
+  `echo "$input"` to relay a multi-line result through to a downstream
+  consumer. `/bin/sh` (dash) on the WSL container treats `\n` as a
+  literal newline sequence, so multi-line outputs (board payloads, agent
+  replies) were getting split into multiple lines and re-wrapped by
+  shell quoting. Unifying on `printf "%s\n" "$input"` makes output
+  round-trip identically across bash and dash.
+- **`task_show` would emit broken JSON for payloads containing `"`.** The
+  original used a single `echo "{\"payload\":\"$payload\"}"` shell
+  string; an embedded `"` (e.g. `"I said \"hi\""`) closed the JSON
+  string early. Fixed by parsing `payload` / `description` / `result`
+  with `jq -Rsr '@json'` to produce a real JSON literal.
+- **`task_create` and `board_write` JSON construction.** Same root
+  cause: shell-string interpolation breaks when user-supplied text
+  contains `"` or backslash. Now built with `jq -nc --arg ... '{...}'`.
+- **`agent_delegate.sh` did not propagate `TEAM_DB_PATH`.** When the
+  PM (running inside a delegated sub-process) called `task_create`, the
+  tool subprocess inherited the wrong `TEAM_DB_PATH` (or none) and
+  SQLite returned `insert failed: no such table: tasks`. The fix passes
+  the parent process's `TEAM_DB_PATH` through to the sub-agent's env
+  so the team DB is visible end-to-end.
+- **`agent_delegate.sh` 120s timeout was too tight for PM planning.**
+  PMs commonly need to call `task_create` 3-6 times plus read a few
+  files, and the LLM backend adds 5-10s of latency per call. Bumped
+  the wall-clock timeout to 300s; the inner ReAct iteration cap
+  (`MAX_NON_INTERACTIVE_ITERS=5`) is unchanged.
+- **`_hist_full` / `_hist_one` ate the field separator on multi-field
+  blocks.** When a single message had both `content` and `raw_input`,
+  the block renderer's leading blank line collided with the `--- #id`
+  header of the next message, making the history dump look like one
+  giant block instead of N distinct ones. Now each block ends with a
+  guaranteed blank line.
+
 ## [Unreleased]
 
 ### Added

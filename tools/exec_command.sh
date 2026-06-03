@@ -4,5 +4,10 @@ if [ -z "$cmd" ]; then
   echo '{"success":false,"error":"missing command"}'
   exit 1
 fi
-output=$(eval "$cmd" 2>&1 || echo "Command failed")
-echo "$output"
+output=$(timeout 10 sh -c "$cmd" 2>&1)
+rc=$?
+if [ $rc -eq 124 ]; then
+  output="$output
+[timeout after 10s, killed]"
+fi
+printf "%s\n" "$output"

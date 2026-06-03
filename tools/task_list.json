@@ -1,0 +1,34 @@
+{
+  "type": "function",
+  "function": {
+    "name": "task_list",
+    "description": "List tasks in the team queue. Optional filters: status, type, assigned_to. Pass ready=1 to return only pending tasks whose depends_on are all done (the 'actionable' queue). Returns a JSON array.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["pending", "claimed", "in_progress", "review", "done", "blocked", "cancelled"],
+          "description": "Filter by status"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["spec", "design", "code", "review", "test", "docs", "meta"],
+          "description": "Filter by task type"
+        },
+        "assigned_to": {
+          "type": "string",
+          "description": "Filter by agent name"
+        },
+        "ready": {
+          "type": "integer",
+          "description": "Set to 1 to return only actionable tasks (pending + all deps done)"
+        }
+      }
+    }
+  },
+  "run": {
+    "interpreter": "bash",
+    "script": "task_list.sh"
+  }
+}

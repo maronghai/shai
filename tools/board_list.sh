@@ -2,7 +2,7 @@
 input="$1"
 db="${BLACKBOARD_DB_PATH:-/data/blackboard.db}"
 
-prefix=$(echo "$input" | jq -r '.prefix // ""' 2>/dev/null)
+prefix=$(printf "%s\n" "$input" | jq -r '.prefix // ""' 2>/dev/null)
 
 if [ -z "$prefix" ]; then
     sqlite3 "$db" "SELECT DISTINCT topic FROM board ORDER BY topic" -json 2>/dev/null

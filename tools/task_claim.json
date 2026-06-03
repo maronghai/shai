@@ -1,0 +1,21 @@
+{
+  "type": "function",
+  "function": {
+    "name": "task_claim",
+    "description": "Claim a task from the queue. Sets assigned_to to the calling agent and status='claimed'. Refuses if the task is already claimed by someone else, or if any depends_on task is not yet 'done'. Returns the task details on success.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "integer",
+          "description": "The id of the task to claim"
+        }
+      },
+      "required": ["task_id"]
+    }
+  },
+  "run": {
+    "interpreter": "bash",
+    "script": "task_claim.sh"
+  }
+}

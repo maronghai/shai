@@ -1,0 +1,21 @@
+{
+  "type": "function",
+  "function": {
+    "name": "task_show",
+    "description": "Get full details of one task: status, description, depends_on, result, artifacts, plus the full event log (created, claimed, progress notes, done). Returns a JSON object with 'task' and 'events' fields.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "integer",
+          "description": "The id of the task to inspect"
+        }
+      },
+      "required": ["task_id"]
+    }
+  },
+  "run": {
+    "interpreter": "bash",
+    "script": "task_show.sh"
+  }
+}

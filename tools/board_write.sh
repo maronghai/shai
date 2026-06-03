@@ -3,9 +3,9 @@ input="$1"
 db="${BLACKBOARD_DB_PATH:-/data/blackboard.db}"
 agent="${AGENT_NAME:-}"
 
-topic=$(echo "$input" | jq -r '.topic // ""' 2>/dev/null)
-payload=$(echo "$input" | jq -r '.payload // ""' 2>/dev/null)
-reply_to=$(echo "$input" | jq -r '.reply_to // null' 2>/dev/null)
+topic=$(printf "%s\n" "$input" | jq -r '.topic // ""' 2>/dev/null)
+payload=$(printf "%s\n" "$input" | jq -r '.payload // ""' 2>/dev/null)
+reply_to=$(printf "%s\n" "$input" | jq -r '.reply_to // null' 2>/dev/null)
 
 if [ -z "$topic" ]; then
     echo '{"success":false,"error":"missing topic"}'
@@ -40,4 +40,6 @@ if [ -z "$new_id" ] || [ "$new_id" = "0" ]; then
     echo '{"success":false,"error":"insert failed"}'
     exit 1
 fi
-echo "{\"id\":$new_id,\"agent\":\"$esc_agent\",\"topic\":\"$esc_topic\"}"
+topic_j=$(printf '%s' "$topic" | jq -Rsr 'if . == "" then "\"\"" else @json end')
+agent_j=$(printf '%s' "$agent" | jq -Rsr 'if . == "" then "\"\"" else @json end')
+jq -nc --argjson id "$new_id" --argjson agent "$agent_j" --argjson topic "$topic_j" '{id:$id, agent:$agent, topic:$topic}'

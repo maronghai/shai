@@ -19,6 +19,8 @@ AGENTS_DIR="${WORK_DIR}/agents"
 CURRENT_AGENT=""
 CURRENT_AGENT_FILE="$DATA_DIR/.current_agent"
 BLACKBOARD_DB="$DATA_DIR/blackboard.db"
+TEAM_DB="$DATA_DIR/team.db"
+TEAM_SCHEMA="$WORK_DIR/team/schema.sql"
 MAX_HISTORY=40
 
 R='\033[0m'; B='\033[1;34m'; G='\033[1;32m'; Y='\033[1;33m'; C='\033[1;36m'; M='\033[1;35m'; D='\033[2m'; DM='\033[90m'
@@ -238,12 +240,246 @@ init_blackboard() {
         CREATE INDEX IF NOT EXISTS idx_board_reply ON board(reply_to);
 SQL
 }
+
+init_team_db() {
+    if [[ -f "$TEAM_SCHEMA" ]]; then
+        sqlite3 "$TEAM_DB" < "$TEAM_SCHEMA" || true
+    else
+        # Fallback: inline schema (matches team/schema.sql)
+        sqlite3 "$TEAM_DB" <<'SQL' || true
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                description TEXT,
+                type TEXT NOT NULL CHECK (type IN ('spec','design','code','review','test','docs','meta')),
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending','claimed','in_progress','review','done','blocked','cancelled')),
+                assigned_to TEXT,
+                depends_on TEXT,
+                priority INTEGER DEFAULT 0,
+                result TEXT,
+                artifacts TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+            CREATE INDEX IF NOT EXISTS idx_tasks_type ON tasks(type);
+            CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks(assigned_to);
+            CREATE TABLE IF NOT EXISTS task_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL,
+                agent TEXT,
+                event TEXT NOT NULL,
+                message TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_events_task ON task_events(task_id);
+            CREATE TABLE IF NOT EXISTS team_state (
+                key   TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+SQL
+    fi
+}
+team_sql() { sqlite3 -cmd 'PRAGMA foreign_keys=ON' "$TEAM_DB" <<< "$1" || true; }
 bb_sql() { sqlite3 "$BLACKBOARD_DB" <<< "$1" || true; }
 bb_quote() {
     local q s
     q="''"
     s="${1//\'/$q}"
     printf "'%s'" "$s"
+}
+
+# type -> agent name mapping for the /team dispatcher
+_team_agent_for_type() {
+    case "$1" in
+        spec) echo "pm" ;;
+        design) echo "architect" ;;
+        code) echo "developer" ;;
+        review) echo "code-reviewer" ;;
+        test) echo "tester" ;;
+        docs) echo "docs" ;;
+        meta) echo "coordinator" ;;
+        *) echo "" ;;
+    esac
+}
+
+# _team_status — show current goal, task counts by status, next ready task
+_team_status() {
+    local goal goal_id total pending done count ready_line
+    goal=$(sqlite3 "$TEAM_DB" "SELECT value FROM team_state WHERE key='current_goal'" 2>/dev/null)
+    goal_id=$(sqlite3 "$TEAM_DB" "SELECT value FROM team_state WHERE key='current_goal_id'" 2>/dev/null)
+    echo "== team status =="
+    if [[ -n "$goal" ]]; then
+        echo "goal:    $goal (id=$goal_id)"
+    else
+        echo "goal:    (none — use /team start <goal>)"
+    fi
+    total=$(sqlite3 "$TEAM_DB" "SELECT COUNT(*) FROM tasks" 2>/dev/null)
+    if [[ "$total" == "0" ]]; then
+        echo "tasks:   0"
+        return 0
+    fi
+    echo "tasks:   $total total"
+    sqlite3 -header -column "$TEAM_DB" "SELECT status, COUNT(*) AS n FROM tasks GROUP BY status ORDER BY n DESC" 2>/dev/null | while IFS= read -r line; do echo "  $line"; done
+    ready_line=$(TEAM_DB_PATH="$TEAM_DB" sh "${WORK_DIR}/tools/task_list.sh" '{"ready":1}' 2>/dev/null)
+    local n_ready
+    n_ready=$(echo "$ready_line" | jq 'length' 2>/dev/null)
+    echo "ready:   $n_ready task(s) (deps satisfied + pending)"
+    if [[ "$n_ready" -gt 0 ]]; then
+        echo "$ready_line" | jq -r '.[] | "  [\(.id) \(.status[0:4])/\(.type)] \(.title)"' 2>/dev/null | head -5
+        echo
+        echo "next:    /team next"
+    fi
+    return 0
+}
+
+# _team_start <goal> — store goal, dispatch PM to break it into tasks
+_team_start() {
+    local goal="$1"
+    if [[ -z "$goal" ]]; then
+        warn "usage: /team start <goal>"
+        return 1
+    fi
+    # Persist goal
+    local esc_goal
+    esc_goal=$(printf '%s' "$goal" | sed "s/'/''/g")
+    sqlite3 "$TEAM_DB" "INSERT OR REPLACE INTO team_state (key, value, updated_at) VALUES ('current_goal', '$esc_goal', datetime('now')); INSERT OR REPLACE INTO team_state (key, value, updated_at) VALUES ('current_goal_id', NULL, datetime('now'));" 2>/dev/null
+    # Create a spec task for the goal itself
+    local spec_id
+    spec_id=$(TEAM_DB_PATH="$TEAM_DB" AGENT_NAME=coordinator sh "${WORK_DIR}/tools/task_create.sh" "$(jq -nc --arg t "Goal: $goal" --arg d "$goal" --arg type spec '{title:$t, description:$d, type:$type}')" 2>/dev/null | jq -r '.id // empty')
+    if [[ -n "$spec_id" ]]; then
+        sqlite3 "$TEAM_DB" "INSERT OR REPLACE INTO team_state (key, value, updated_at) VALUES ('current_goal_id', '$spec_id', datetime('now'))" 2>/dev/null
+    fi
+    ok "team started: goal=\"$goal\" (spec task #$spec_id)"
+    info "dispatching PM to break the goal into tasks..."
+    # Dispatch PM via agent_delegate. Instruct PM to (a) use task_create to break
+    # the goal into sub-tasks and (b) write a board reply summarizing what it did.
+    local payload topic
+    topic="team-spec-$(date +%s)"
+    payload=$(jq -nc --arg agent pm --arg task "Your only job: turn this goal into 4-6 concrete tasks using the task_create tool. Do NOT read files, do NOT search — just create the tasks.
+
+For each task, call task_create with:
+- title: one short sentence (1 line)
+- description: enough detail to start work (1-2 paragraphs)
+- type: one of design|code|review|test|docs (pick the right one for the step)
+- depends_on: comma-separated task ids that must be done first (only if needed)
+- priority: 0-10 (higher = sooner)
+
+After creating all tasks, write a 3-5 line summary to the blackboard with board_write(topic='$topic', payload='created N tasks: <one-line summary>').
+
+Goal: $goal" --arg topic "$topic" '{agent:$agent, task:$task, topic:$topic}')
+    local result
+    result=$(AGENT_NAME=coordinator WORK_DIR="$WORK_DIR" AGENTS_DIR="$AGENTS_DIR" BLACKBOARD_DB_PATH="$BLACKBOARD_DB" TEAM_DB_PATH="$TEAM_DB" DELEGATION_DEPTH=0 sh "${WORK_DIR}/tools/agent_delegate.sh" "$payload" 2>&1)
+    # Even if the PM didn't write a board reply, check the team.db for new tasks
+    local new_tasks
+    new_tasks=$(sqlite3 "$TEAM_DB" "SELECT COUNT(*) FROM tasks WHERE id > 1" 2>/dev/null)
+    if echo "$result" | jq -e '.success == false' >/dev/null 2>&1 && [[ "$new_tasks" -le 0 ]]; then
+        warn "PM failed to break the goal into tasks"
+        echo "$result" | head -5
+    elif [[ "$new_tasks" -gt 0 ]]; then
+        ok "PM created $new_tasks sub-tasks"
+    fi
+    # Mark the spec task as done (PM completed by creating subtasks)
+    if [[ -n "$spec_id" ]]; then
+        TEAM_DB_PATH="$TEAM_DB" AGENT_NAME=coordinator sh "${WORK_DIR}/tools/task_done.sh" "$(jq -nc --argjson id "$spec_id" --arg r "PM broke goal into $new_tasks sub-task(s)" '{task_id:$id, result:$r}')" 2>/dev/null
+    fi
+    info "use /team next to dispatch the first sub-task"
+    return 0
+}
+
+# _team_next — dispatch the next ready task to its assigned agent
+_team_next() {
+    local goal_id
+    goal_id=$(sqlite3 "$TEAM_DB" "SELECT value FROM team_state WHERE key='current_goal_id'" 2>/dev/null)
+    if [[ -z "$goal_id" ]]; then
+        warn "no active goal — use /team start <goal>"
+        return 1
+    fi
+    # Get next ready task
+    local next
+    next=$(TEAM_DB_PATH="$TEAM_DB" sh "${WORK_DIR}/tools/task_list.sh" '{"ready":1,"limit":1}' 2>/dev/null | jq -r '.[0] // empty' 2>/dev/null)
+    if [[ -z "$next" ]]; then
+        info "no ready tasks (all blocked or done)"
+        return 0
+    fi
+    local id title desc type
+    id=$(echo "$next" | jq -r '.id')
+    title=$(echo "$next" | jq -r '.title')
+    type=$(echo "$next" | jq -r '.type')
+    desc=$(echo "$next" | jq -r '.description // ""')
+    local agent
+    agent=$(_team_agent_for_type "$type")
+    if [[ -z "$agent" ]]; then
+        warn "unknown task type '$type' for task #$id"
+        return 1
+    fi
+    info "dispatching task #$id (type=$type, agent=$agent): $title"
+    # Mark as claimed
+    TEAM_DB_PATH="$TEAM_DB" AGENT_NAME=coordinator sh "${WORK_DIR}/tools/task_claim.sh" "$(jq -nc --argjson id "$id" '{task_id:$id}')" 2>/dev/null
+    # Build delegation payload
+    local topic
+    topic="team-task-$id-$(date +%s)"
+    local msg
+    msg="You are the $agent agent. Work on task #$id:
+title: $title
+type: $type
+description:
+$desc
+
+When you are done, you MUST write a 5-15 line summary of what you did to the blackboard using board_write with topic='$topic'. The summary is how the coordinator learns the work is complete. Then you can stop."
+    local payload reply
+    payload=$(jq -nc --arg agent "$agent" --arg task "$msg" --arg topic "$topic" '{agent:$agent, task:$task, topic:$topic}')
+    reply=$(AGENT_NAME=coordinator WORK_DIR="$WORK_DIR" AGENTS_DIR="$AGENTS_DIR" BLACKBOARD_DB_PATH="$BLACKBOARD_DB" TEAM_DB_PATH="$TEAM_DB" DELEGATION_DEPTH=0 sh "${WORK_DIR}/tools/agent_delegate.sh" "$payload" 2>&1)
+    # Truncate reply to reasonable size
+    local result_summary
+    if [[ -z "$reply" ]] || echo "$reply" | jq -e '.success == false' >/dev/null 2>&1; then
+        warn "agent '$agent' did not write a board reply for task #$id"
+        echo "$reply" | head -3
+        # Fall back: mark the task done with a stub result so the workflow can continue.
+        # The user can re-run /team next for the next task; this task is recorded as
+        # completed by $agent (per the LLM's silence) so dependent tasks can progress.
+        result_summary="(no board reply from $agent) $reply"
+        result_summary=$(echo "$result_summary" | head -c 4000)
+    else
+        result_summary=$(echo "$reply" | head -c 4000)
+    fi
+    # Mark task done
+    TEAM_DB_PATH="$TEAM_DB" AGENT_NAME=coordinator sh "${WORK_DIR}/tools/task_done.sh" "$(jq -nc --argjson id "$id" --arg r "$result_summary" '{task_id:$id, result:$r}')" 2>/dev/null
+    ok "task #$id done (by $agent)"
+    echo "$result_summary" | head -10
+    return 0
+}
+
+# _team_stop — clear the current goal (keep tasks)
+_team_stop() {
+    sqlite3 "$TEAM_DB" "DELETE FROM team_state WHERE key IN ('current_goal','current_goal_id')" 2>/dev/null
+    ok "team stopped (current goal cleared)"
+    return 0
+}
+
+# _team_clear — wipe all tasks, events, and goal state
+_team_clear() {
+    local t_count e_count goal
+    t_count=$(sqlite3 -cmd 'PRAGMA foreign_keys=ON' "$TEAM_DB" "SELECT COUNT(*) FROM tasks" 2>/dev/null || echo 0)
+    e_count=$(sqlite3 -cmd 'PRAGMA foreign_keys=ON' "$TEAM_DB" "SELECT COUNT(*) FROM task_events" 2>/dev/null || echo 0)
+    goal=$(sqlite3 "$TEAM_DB" "SELECT value FROM team_state WHERE key='current_goal'" 2>/dev/null)
+    if [[ "$t_count" -eq 0 && "$e_count" -eq 0 && -z "$goal" ]]; then
+        ok "team already empty (0 tasks, 0 events, no goal)"
+        return 0
+    fi
+    sqlite3 -cmd 'PRAGMA foreign_keys=ON' "$TEAM_DB" <<SQL 2>/dev/null
+DELETE FROM task_events;
+DELETE FROM tasks;
+DELETE FROM team_state;
+DELETE FROM sqlite_sequence;
+SQL
+    local goal_note=""
+    [[ -n "$goal" && "$goal" != "" ]] && goal_note=" (was goal: \"$goal\")"
+    ok "team cleared: $t_count tasks and $e_count events deleted${goal_note}"
+    return 0
 }
 
 add_message() {
@@ -332,6 +568,15 @@ help() {
     echo "  /agents           - List all available agents (numbered; with description and tags)
   /agents @tag      - List agents whose frontmatter tags include @tag"
     echo "  /board [topic]    - List blackboard topics or show entries for a topic"
+    echo "  /tasks            - List all tasks (compact)"
+    echo "  /tasks <status>   - List tasks filtered by status (pending|done|...)"
+    echo "  /tasks ready      - List pending tasks whose depends_on are all done"
+    echo "  /task <id>        - Show one task with full event log"
+    echo "  /team             - Show team status (current goal + tasks + ready)"
+    echo "  /team start <goal>- Start a team session (PM breaks the goal into tasks)"
+    echo "  /team next        - Dispatch the next ready task to its agent"
+    echo "  /team stop        - Clear the current goal (keep tasks)"
+    echo "  /team clear       - Wipe all tasks + events + goal"
     echo "  /help             - Show this help"
     echo "  /reload           - Reload the program"
     echo "  /exit             - Exit"
@@ -761,6 +1006,14 @@ handle_tool_call() {
     args=$(jq -r '.function.arguments // ""' <<< "$tc" 2>/dev/null)
     id=$(jq -r '.id // ""' <<< "$tc" 2>/dev/null)
 
+    if ! jq -e . >/dev/null 2>&1 <<< "$args"; then
+        warn "tool call '$name' (id=$id) has invalid JSON arguments: $args"
+        args='{}'
+        run_tool "$name" "$args" >/dev/null 2>&1 || true
+        save_tool_result "$id" '{"success":false,"error":"model emitted invalid JSON for arguments; rerun with valid JSON"}'
+        return
+    fi
+
     info "  tool: $name($args) [id=$id]"
 
     local result
@@ -840,6 +1093,7 @@ process_input() {
 
 init_db
 init_blackboard
+init_team_db
 prune_history
 load_history
 load_tools
@@ -887,6 +1141,7 @@ while true; do
             elif [[ "$input" == "/agent reload" ]]; then
                 SYSTEM_PROMPT="$(load_system_prompt)"
                 init_db
+                init_team_db
                 prune_history
                 load_history
                 load_tools
@@ -928,6 +1183,80 @@ while true; do
             arg="${arg% }"
             echo "== board topic='$arg' =="
             sqlite3 -header -column "$BLACKBOARD_DB" "SELECT id, agent, substr(payload,1,80) as payload, COALESCE(reply_to,'') as reply_to, created_at FROM board WHERE topic = $(bb_quote "$arg") ORDER BY id" 2>/dev/null || info "no entries"
+            continue
+            ;;
+        /tasks)
+            init_team_db
+            TEAM_DB_PATH="$TEAM_DB" sh tools/task_list.sh '{}' | jq -r '.[] | "[\(.id) \(.status|tostring|.[0:4])/\(.type)] \(.assigned_to|if . == "" then "_" else . end) p=\(.priority) \(.title)"' 2>/dev/null || info "no tasks"
+            continue
+            ;;
+        /tasks\ *)
+            arg="${input#/tasks }"
+            arg="${arg% }"
+            init_team_db
+            TEAM_DB_PATH="$TEAM_DB" sh tools/task_list.sh "{\"status\":\"$arg\"}" | jq -r '.[] | "[\(.id) \(.status|tostring|.[0:4])/\(.type)] \(.assigned_to|if . == "" then "_" else . end) p=\(.priority) \(.title)"' 2>/dev/null || info "no tasks"
+            continue
+            ;;
+        /tasks\ ready)
+            init_team_db
+            TEAM_DB_PATH="$TEAM_DB" sh tools/task_list.sh '{"ready":1}' | jq -r '.[] | "[\(.id) \(.status|tostring|.[0:4])/\(.type)] \(.assigned_to|if . == "" then "_" else . end) p=\(.priority) \(.title)"' 2>/dev/null || info "no ready tasks"
+            continue
+            ;;
+        /task\ *)
+            arg="${input#/task }"
+            arg="${arg% }"
+            if ! [[ "$arg" =~ ^[0-9]+$ ]]; then
+                warn "usage: /task <id>"
+                continue
+            fi
+            init_team_db
+            TEAM_DB_PATH="$TEAM_DB" sh tools/task_show.sh "{\"task_id\":$arg}" | jq -r '
+                if .success then
+                    (.task as $t |
+                     [$t.id, $t.status, $t.title, ($t.depends_on // ""), ($t.description // ""), ($t.result // ""), ($t.artifacts // ""), $t.assigned_to, $t.priority, $t.type, (.events | length)] as $h |
+                     ([
+                        "ID \($h[0]) [\($h[1])] type=\($h[9]) assignee=\(if ($h[7] // "") == "" then "-" else $h[7] end) priority=\($h[8])",
+                        "title:   \($h[2])",
+                        "deps:    \(if $h[3] == "" then "-" else $h[3] end)",
+                        "desc:    \($h[4])",
+                        (if $h[5] != "" then "result:  \($h[5])" else empty end),
+                        (if $h[6] != "" then "artifacts: \($h[6])" else empty end),
+                        "events (\($h[10])):"
+                     ] + [.events[] | "  \(.created_at) [\(.event)]\(if .agent != "" then " by \(.agent)" else "" end)\(if .message != "" then ": \(.message)" else "" end)"]) | join("\n"))
+                else
+                    "error: \(.error)"
+                end'
+            continue
+            ;;
+        /team)
+            init_team_db
+            _team_status
+            continue
+            ;;
+        /team\ status)
+            init_team_db
+            _team_status
+            continue
+            ;;
+        /team\ start\ *)
+            arg="${input#/team start }"
+            arg="${arg% }"
+            _team_start "$arg" || warn "team start failed"
+            continue
+            ;;
+        /team\ next)
+            init_team_db
+            _team_next || warn "team next failed"
+            continue
+            ;;
+        /team\ stop)
+            init_team_db
+            _team_stop || warn "team stop failed"
+            continue
+            ;;
+        /team\ clear)
+            init_team_db
+            _team_clear || warn "team clear failed"
             continue
             ;;
         /hist\ *)

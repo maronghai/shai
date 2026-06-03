@@ -1170,7 +1170,356 @@ You> /hist full 114     # 单条（_hist_full 风格）：id=114 的 `--- #id ro
 `/agent` 切回去时一眼就能看到。
 
 `_agent_prompt` 在每次 `read` 时调用，所以 `/agent` 切换后下一条命令的
-提示符立即变色，不需要重启 REPL。---
+提示符立即变色，不需要重启 REPL。
+
+---
+
+## 第 14 章：AI Coding Team
+
+第 13 章讲了怎么手动切 agent、怎么用 blackboard 通信、怎么用 `agent_delegate`
+把任务扔给另一个 agent 跑。这些是**机制**——但要真正在项目上演示一次"开需求
+→ 出方案 → 写代码 → 写测试 → 改文档 → 复盘"的全流程，coordinator 必须
+能**自驱**而不是每步等人按。本章讲怎么把这套机制组装成一个能自跑的团队。
+
+### 14.1 从手动到自驱：还差什么
+
+第 13 章的 coordinator 用法是**手动协作**——人切到 coordinator，告诉它
+"做 X"，它自己调度。如果想"coordinator 自己开一个 session，跑完整
+流程，期间人不动"还需要三个东西：
+
+1. **任务队列**：一个持久化、跨进程的"待办"列表，coordinator 写、
+   sub-agent 读。
+2. **状态机**：每个任务有生命周期（`pending` → `claimed` → `in_progress` →
+   `done`），并支持依赖（"test 任务要等 code 任务 done"）。
+3. **派发循环**：coordinator 反复做"找下一个 ready 任务 → 派给对应
+   agent → 等 reply → 标 done"这件事，直到所有任务完成。
+
+v0.2.0 加进来的就是这三件：`.data/team.db`（任务队列 + 状态机）+ 6 个
+task 工具（CRUD 接口）+ 4 个 `/team` 子命令（派发循环）。
+
+### 14.2 任务表 schema
+
+`.data/team.db` 三个表（详细在 `team/schema.sql`）：
+
+```sql
+CREATE TABLE tasks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    type        TEXT    NOT NULL CHECK (type IN ('spec','design','code','review','test','docs','meta')),
+    status      TEXT    NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending','ready','claimed','in_progress','done','blocked','cancelled')),
+    title       TEXT    NOT NULL,
+    description TEXT    NOT NULL DEFAULT '',
+    depends_on  TEXT    NOT NULL DEFAULT '',  -- CSV of task ids
+    assigned_to TEXT    NOT NULL DEFAULT '',  -- agent name
+    created_at  TEXT    DEFAULT (datetime('now')),
+    updated_at  TEXT    DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_tasks_status ON tasks(status);
+CREATE INDEX idx_tasks_type   ON tasks(type);
+
+CREATE TABLE task_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id    INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    event      TEXT    NOT NULL,           -- 'created' | 'claimed' | 'status' | 'reply' | 'done'
+    agent      TEXT    NOT NULL DEFAULT '',
+    detail     TEXT    NOT NULL DEFAULT '',
+    created_at TEXT    DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_events_task ON task_events(task_id, id);
+
+CREATE TABLE team_state (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT ''
+);
+```
+
+字段选择上有几个值得说明的取舍：
+
+- **6 种 `type` 对应 6 种角色**（`spec/design/code/review/test/docs` +
+  `meta` 给 coordinator 自己的杂务）。`type` 不直接绑 agent，而是用
+  `_team_agent_for_type` 这个映射做查表——以后加新 agent 不用动 schema。
+- **`depends_on` 用 CSV 字符串**而不是单独的关系表。任务依赖通常
+  是"我得等 1-3 个上游任务"，加张关系表是过度设计。`task_list` 算
+  `ready=1` 时用 `LIKE '%,<id>,%'` 反向查"有谁依赖我" + `NOT EXISTS`
+  子查询过滤"我依赖的人还没 done"。
+- **7 种 `status`**：把 `ready` 和 `pending` 拆开——`pending` 是"被
+  创建了但有依赖"，`ready` 是"无依赖可派发"；这样 SQL 过滤 ready
+  任务不用每次重算依赖图。`claimed` / `in_progress` 进一步拆开是为了
+  audit trail（什么时候谁 claim 的，进展如何）。
+- **`task_events` 是 append-only audit trail**。`task_done` /
+  `task_claim` / `task_update` 每次状态切换都写一行事件，可以从
+  `task_show` 一路 replay 出整个任务的生老病死。
+
+### 14.3 任务工具一览
+
+| 工具 | 输入 | 行为 |
+|------|------|------|
+| `task_create` | `type, title, description?, depends_on?` | `INSERT`；返回 `{id}` |
+| `task_list` | `status?` (or `ready`), `type?`, `limit?` | `SELECT` + 过滤；`ready=1` 时用 NOT EXISTS 子查询 |
+| `task_claim` | `task_id` | 检查 `status='ready'`，设为 `claimed`，记 `assigned_to=$AGENT_NAME`；并发保护用单条 `UPDATE ... WHERE status='ready'` |
+| `task_update` | `task_id, status?` (or `assigned_to?` or `description?`) | 写 `task_events`，更新字段；不允许多 status 互转（如 `done` → `pending` 拒绝） |
+| `task_done` | `task_id, result?` | 设为 `done`，写 `result` 到 `task_events`；只允许 `assigned_to` 自己或 coordinator 调用 |
+| `task_show` | `task_id` | 任务本体 + 全 `task_events` 的 JSON |
+
+`task_show` 的实现值得一提：它**不**用一个 `jq` 把整行 SQL result 包装
+成 JSON（那样 title 里有 `"` 就破坏），而是**逐字段查** `tasks`，再**逐
+事件查** `task_events`，每个文本字段都用 `jq -Rsr '@json'` 转义成 JSON
+字面量，最后再 `jq -s '{task:.[0], events:.[1:]}'` 拼装。这一套下来
+title / description / result 里有任意字符（`"`、换行、控制字符）都能
+原样 round-trip。
+
+### 14.4 REPL 任务命令
+
+```
+/tasks                       # 按 status 分组的计数
+/tasks pending                # 列出 status=pending 的任务
+/tasks ready                  # 列出 ready=1 的任务（可派发）
+/tasks done                   # 历史
+/tasks code                   # 按 type 过滤
+/tasks 5                      # 单条（等于 /task 5）
+/task 5                       # 单条详情：id, type, status, title, description, depends_on, assigned_to, events
+```
+
+`/tasks` 默认按 status 分组（done / in_progress / claimed / ready /
+pending / blocked / cancelled），每组下用紧凑一行展示。
+`/task <id>` 是 `task_show` 的人检视入口——把 `task_events` 按时间顺序
+打印，事件之间用 `───` 分隔，事件本身一行 `event agent=... detail=...`。
+
+### 14.5 `/team` 派发循环
+
+`/team` 是 coordinator 的"开始/下一步/状态/停止/清空"五件套：
+
+```
+/team                  # = /team status
+/team status           # 当前 goal + 任务分布 + 下一步预览
+/team start <goal>     # 开新目标
+/team next             # 派发下一个 ready 任务
+/team stop             # 清空 goal（保留任务）
+/team clear            # 抹掉所有任务 + events + goal（不可恢复）
+```
+
+**`/team start <goal>` 做的事**：
+
+1. 写 `team_state.current_goal = <goal>` + `current_goal_id = 0`（先占位）。
+2. 创建 1 个 `spec` 任务（type=spec, title="Goal: <goal>", status=pending）。
+3. **把 spec 任务标 ready**（它没有依赖）。
+4. 调 `agent_delegate(agent="pm", task="<goal 的完整描述>...Create
+   sub-tasks for each phase of the work, using `task_create`...", topic="team:start")`。
+5. PM 跑完，在 blackboard 写一行 `team:start` 的 reply。
+6. 父进程从 reply 读出 PM 的总结（"我创建了 5 个任务：2 个 design + 1 个
+   code + 1 个 test + 1 个 docs"），把这个总结写进 spec 任务的 `description`，
+   再把 spec 任务标 `done`，最后把 `current_goal_id` 改成 spec 的 id。
+
+**`/team next` 做的事**：
+
+1. 读 `team_state.current_goal`；空就打印 `no active goal` 并返回。
+2. `task_list status=ready limit=1`——只取一个 task，保持**manual-but-scripted** 节奏。
+3. 查不到 ready 任务时：再 `task_list` 看是不是真的全 done，是就
+   打印 `all tasks done. /team stop to clear goal.`。
+4. 拿到 task 后：
+   - 用 `_team_agent_for_type <type>` 算出要派给谁。
+   - 调 `task_claim <id>`（设 `assigned_to=coordinator`，避免两个
+     `/team next` 并发跑时重复派）。
+   - 调 `agent_delegate(agent=<agent>, task="<title>\n<description>",
+     topic="task:<id>")`。
+   - 父进程轮询 blackboard 等 reply，300s 超时。
+5. 拿到 reply：把 reply 截断到 4000 字写进 `task_events.detail`，
+   调 `task_done <id>`。
+6. **fallback**：子 agent 跑了 300s 没写 reply（多半 LLM 端
+   `parse error: error.InvalidJson`），父进程也标 done，
+   `detail="(no board reply from <agent>)"`，这样依赖任务能继续走。
+
+**`/team stop` 做的事**：清 `team_state.current_goal` 和
+`current_goal_id`。**不**删 tasks——历史是 audit trail，留着。
+
+**`/team clear` 做的事**：`DELETE FROM task_events; tasks; team_state;
+sqlite_sequence;`——把整个 team.db 抹成空 db。**不可恢复**——和 `/team stop`
+的差别就在这里：`stop` 是"暂停，审计留着"，`clear` 是"全部推倒重来"。
+幂等：空 db 再 `clear` 输出 `team already empty (0 tasks, 0 events, no goal)`。
+典型用途：跑完一次 demo 之后想再开一轮新 goal、又不想被旧任务污染 ready 队列
+（虽然 `status` 字段没 ready=1，但 audit 还在），就 `clear` 后 `start`。
+
+### 14.6 manual-but-scripted 编排风格
+
+`/team next` 一次只派一个任务。这个**故意**的限制有几层考虑：
+
+- **可调试**：派 5 个任务并发跑的时候，trace 会交错；一次一个，
+  你能清楚看到"task #2 派给 architect → architect 跑 47s → reply 写了
+  1200 字 → task #2 标 done → task #3 派给 developer"。
+- **可重放**：`/team next` 是幂等的——失败重跑不会重复创建任务
+  （`task_claim` 做了 `WHERE status='ready'` 保护）。
+- **不触发并行**：bash 没有进程池；想要并行得用 GNU parallel + 多
+  个 `/team next` 后台，复杂度爆炸。一次一个能跑就行。
+- **避免 LLM 端雪崩**：连续派 5 个 `agent_delegate` 等于同时打 5 个
+  HTTP 请求到 LLM 端，token 限流很容易爆。串行派让后端有时间歇。
+
+如果以后需要"全速派发"，最简单的扩展是把 `/team next` 加一个
+`/team next all` 子命令，循环里 `task_claim` + `agent_delegate &`
+后端跑。当前 v0.2.0 不带——保持**简单能跑**。
+
+### 14.7 type→agent 映射
+
+`_team_agent_for_type` 是一个 8 行的 case：
+
+| task type | 派给 |
+|---|---|
+| `spec` | `pm` |
+| `design` | `architect` |
+| `code` | `developer` |
+| `review` | `code-reviewer` |
+| `test` | `tester` |
+| `docs` | `docs` |
+| `meta` | `coordinator` |
+
+这映射是 `/team next` 的核心——它把"task 的领域"翻译成"谁来干"。
+
+加新角色（比如 `security-auditor`）的步骤：写 `agents/security-auditor/
+system.md`（带 `type:security` tag）→ 在 `_team_agent_for_type` 加一行
+`security → security-auditor` → 在 task 表的 CHECK 约束加 `'security'`。
+三处改动，10 分钟内能做完。
+
+### 14.8 6 个新 persona 一览
+
+每个 persona 写在自己 `agents/<name>/system.md`，frontmatter 含
+`type:<role>` tag 让 `/agents @<type>` 能找到它。
+
+- **`pm`** (spec, planning, type:pm) — 接到 goal 后：clarify（问清楚含糊点）→
+  spec（写出"做什么/不做什么/验收标准"三段）→ prioritize（拆出 3-7
+  个子任务，每个带 `type`、`title`、`description`，用 `task_create` 入队）。
+  **不写代码**，只产出"清单 + 验收"。
+- **`architect`** (design, type:design) — 接到一个 design 任务后：先读
+  相关源码 → 输出 contract（接口签名/输入输出/error 路径）+ schema
+  （新表/新字段/迁移）+ test plan（先列要测的边界条件）。**不写实现代码**，
+  只产出"设计 + 测试用例大纲"。
+- **`developer`** (code, type:code) — 接到 code 任务：读 architect 的设计 →
+  写实现 + 最小测试 → 跑一遍确认不破坏现有功能 → 在 board 写"完成 +
+  哪些文件动了"。
+- **`tester`** (test, type:test) — 接到 test 任务：黑盒——只看任务描述和
+  最终行为，不看 developer 的实现 → 跑现有测试 + 写新边界 case。
+  **不信任**，自己造失败用例。
+- **`code-reviewer`** (review, read-only) — 第 13 章已有的 read-only
+  persona；接到 review 任务：通读 diff + 列 5 类问题（correctness / security
+  / readability / test coverage / doc），每条带 file:line 引用。**不允许**
+  `exec_command`（基线工具被 `tools/exec_command.{json,sh}` 覆盖成
+  `success:false`）。
+- **`docs`** (docs, type:docs) — 接到 docs 任务：把这次改动同步到 README /
+  book.md / CHANGELOG.md；如果是新功能，book.md 加一节"用法"；CHANGELOG
+  写到对应 unreleased 段。
+- **`coordinator`** (orchestration, planning, delegation, type:meta) —
+  已有 persona；现在还多了 `type:meta` 让它能 own "团队总结" / "里程碑
+  收尾"这类杂务任务。
+
+每个 persona 的 system.md 都有一句"Do not use `exec_command`"或
+"Use `task_create` to enqueue your deliverables"——具体的"调用什么
+工具"指引。**但工具层的硬约束**（sub-agent 跑时 `exec_command` +
+`agent_delegate` 被脚本硬过滤掉）才是底线，prompt 只能做兜底。
+
+### 14.9 端到端 demo 跟踪
+
+把"在 zig-cos 上加一个 `/tasks` 命令"作为 demo 目标跑一遍的实际 trace：
+
+**Step 1: PM 拆任务**（`/team start "add /tasks command"`）
+
+```
+dispatching task #1 (type=spec, agent=pm): Goal: add /tasks command
+  PM: "I'll break this down into 5 phases:
+        1. design the command syntax and data model (design)
+        2. implement the parsing + dispatch (code)
+        3. add test cases (test)
+        4. update README + book.md (docs)
+        5. final code review (review)"
+  -> task_create(type=design, title="Design /tasks command structure")
+  -> task_create(type=code, title="Implement /tasks in ai-agent.sh", depends_on="2")
+  -> task_create(type=test, title="Test /tasks in REPL", depends_on="3")
+  -> task_create(type=docs, title="Update README with /tasks", depends_on="3")
+  -> task_create(type=review, title="Review /tasks implementation", depends_on="3,4,5")
+  board: pm wrote 5 sub-tasks + spec task marked done
+```
+
+**Step 2: 派发循环**（5 次 `/team next`）
+
+```
+/team next
+  ready=1: #2 design "Design /tasks command structure"
+  -> agent_delegate(architect, "Design the /tasks command and task DB schema")
+  architect: reads ai-agent.sh, returns 3-paragraph design
+  -> task_done #2 (by architect)
+
+/team next
+  ready=1: #3 code "Implement /tasks in ai-agent.sh"  (depends on #2 done)
+  -> agent_delegate(developer, ...)
+  developer: edits ai-agent.sh, adds /tasks case, runs test_final.sh
+  -> task_done #3 (by developer)
+
+/team next
+  ready=1: #4 test "Test /tasks in REPL"  (depends on #3 done)
+  -> agent_delegate(tester, ...)
+  tester: writes 3 new test cases in /tmp/test_final.sh, runs them
+  -> task_done #4 (by tester)
+
+/team next
+  ready=1: #5 docs "Update README with /tasks"  (depends on #3 done)
+  -> agent_delegate(docs, ...)
+  docs: edits README.md, book.md, CHANGELOG.md
+  -> task_done #5 (by docs)
+
+/team next
+  ready=1: #6 review "Review /tasks implementation"  (depends on #3,#4,#5 all done)
+  -> agent_delegate(code-reviewer, ...)
+  code-reviewer: 5 categories of feedback, no BLOCKERs
+  -> task_done #6 (by code-reviewer)
+
+/team next
+  ready=0: all tasks done
+  -> "all tasks done. /team stop to clear goal."
+```
+
+总耗时大概 3-5 分钟（每轮 `agent_delegate` 实际跑 30-60s，串行），
+**全程无人工介入**。
+
+### 14.10 故障模式与兜底
+
+跑 demo 时遇到的几个故障模式 + 怎么处理：
+
+- **LLM 端 `parse error: error.InvalidJson`**：模型偶尔返回的 JSON
+  body 少个 `]`。`run_non_interactive` catch 住，write 一行
+  `[error] parse error` 的 reply，照样标 done。**不**死循环重试——
+  一次失败就跳过，让依赖任务继续。
+- **PM 拆出来 24 个重复任务**：模型有时把"design"+"design"+"design"
+  当成 3 个独立任务拆出来。`task_create` 不去重（DB 层不该有"语义
+  去重"），但 `/team` 派发时会按 type 排，把同样的 design 一个个
+  派给 architect，architect 看到 `depends_on` 链会发现重复。
+  **修法**：PM 的 prompt 现在显式说"create 3-7 sub-tasks, one per
+  phase, no duplicates"。
+- **agent 不写 board reply**：sub-agent 跑完最后一轮 ReAct 但没
+  显式 `board_write`，父进程 300s 超时。`/team next` fallback 标
+  done + `(no board reply from <agent>)`——下一轮 `task_list ready`
+  就能继续。**修法**：`_team_start` 在 PM 的 prompt 里显式
+  "After creating all tasks, write a summary to the blackboard"，
+  `_team_next` 在 agent prompt 里也加这句。
+- **`task_create` 报 "insert failed: no such table: tasks"**：
+  PM 跑在 forked 子进程里，`TEAM_DB_PATH` 没透传过去，sub-agent
+  默认找错位置。**修法**：`agent_delegate.sh` 在 fork 前 export
+  `TEAM_DB_PATH=$PARENT_TEAM_DB_PATH`，sub-agent 的 env 自动继承。
+
+### 14.11 写在最后
+
+整套 AI Coding Team 的代码量：
+
+- `team/schema.sql`：30 行 SQL
+- 6 个 task 工具 × 2 文件（.json + .sh）：~500 行
+- `ai-agent.sh` 新增：~250 行（5 个 `_team_*` 函数 + `/team` case 分支 + 3 个 `_task_*` helper）
+- 6 个新 persona × 1 system.md：~250 行
+
+总 ~1000 行，换来一个**自跑**的 PM / architect / developer / tester /
+code-reviewer / docs / coordinator 七人团队，能在 zig-cos 自身上把
+"加一个新功能"这件事从 goal 跑到 changelog 写完。
+
+设计原则还是第 13 章那三条（**单一职责 / 复用基元 / 工具层硬约束**），
+外加一条：**自驱用 DB 队列，不用内存消息**——session 没了任务还在，
+明天起来 `/team next` 继续派。
+
+---
 
 ## 附录
 
@@ -1234,4 +1583,4 @@ Happy Hacking!
 
 ---
 
-*字数：约 18,000 字 | 完成于 2026 年 6 月*
+*字数：约 25,000 字 | 完成于 2026 年 6 月*

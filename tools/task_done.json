@@ -1,0 +1,29 @@
+{
+  "type": "function",
+  "function": {
+    "name": "task_done",
+    "description": "Mark a task as done. Records the result (summary) and optional artifacts (JSON string of file paths / PR refs). Sets status='done'. Must be called by the agent that claimed the task, or by the coordinator.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "integer",
+          "description": "The id of the task to mark done"
+        },
+        "result": {
+          "type": "string",
+          "description": "Final summary of what was accomplished (1-5 paragraphs)"
+        },
+        "artifacts": {
+          "type": "string",
+          "description": "JSON string of artifacts: list of file paths, commit refs, PR numbers, etc."
+        }
+      },
+      "required": ["task_id", "result"]
+    }
+  },
+  "run": {
+    "interpreter": "bash",
+    "script": "task_done.sh"
+  }
+}

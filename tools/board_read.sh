@@ -2,9 +2,9 @@
 input="$1"
 db="${BLACKBOARD_DB_PATH:-/data/blackboard.db}"
 
-topic=$(echo "$input" | jq -r '.topic // ""' 2>/dev/null)
-since=$(echo "$input" | jq -r '.since_id // 0' 2>/dev/null)
-limit=$(echo "$input" | jq -r '.limit // 50' 2>/dev/null)
+topic=$(printf "%s\n" "$input" | jq -r '.topic // ""' 2>/dev/null)
+since=$(printf "%s\n" "$input" | jq -r '.since_id // 0' 2>/dev/null)
+limit=$(printf "%s\n" "$input" | jq -r '.limit // 50' 2>/dev/null)
 
 if [ -z "$topic" ]; then
     echo '{"success":false,"error":"missing topic"}'

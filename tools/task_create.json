@@ -1,0 +1,38 @@
+{
+  "type": "function",
+  "function": {
+    "name": "task_create",
+    "description": "Create a new task in the team queue (.data/team.db). The task starts in 'pending' state and is unassigned. Returns the new task id.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Short title of the task (1 line)"
+        },
+        "description": {
+          "type": "string",
+          "description": "Full task description / acceptance criteria"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["spec", "design", "code", "review", "test", "docs", "meta"],
+          "description": "Task type — drives which persona picks it up (pm/architect/developer/reviewer/tester/docs)"
+        },
+        "depends_on": {
+          "type": "string",
+          "description": "Comma-separated task ids that must reach 'done' before this task can be claimed (e.g. '2,3')"
+        },
+        "priority": {
+          "type": "integer",
+          "description": "Higher = picked first; default 0"
+        }
+      },
+      "required": ["title", "type"]
+    }
+  },
+  "run": {
+    "interpreter": "bash",
+    "script": "task_create.sh"
+  }
+}

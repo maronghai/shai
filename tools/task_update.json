@@ -1,0 +1,35 @@
+{
+  "type": "function",
+  "function": {
+    "name": "task_update",
+    "description": "Update a task's status, post a progress note, or attach a comment. Common use: 'claimed' -> 'in_progress' when work begins, 'in_progress' -> 'review' when handing off, appending 'progress' notes while working.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "integer",
+          "description": "The id of the task to update"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "claimed", "in_progress", "review", "done", "blocked", "cancelled"],
+          "description": "New status (optional — omit to keep current)"
+        },
+        "message": {
+          "type": "string",
+          "description": "Progress note / reason / context to attach to the event log"
+        },
+        "event": {
+          "type": "string",
+          "enum": ["progress", "review", "blocked", "cancelled", "comment"],
+          "description": "Event kind to log (default: 'comment')"
+        }
+      },
+      "required": ["task_id"]
+    }
+  },
+  "run": {
+    "interpreter": "bash",
+    "script": "task_update.sh"
+  }
+}

@@ -17,9 +17,9 @@ agents_dir="${AGENTS_DIR:-/data/agents}"
 from_agent="${AGENT_NAME:-}"
 depth="${DELEGATION_DEPTH:-0}"
 
-agent=$(echo "$input" | jq -r '.agent // ""' 2>/dev/null)
-task=$(echo "$input" | jq -r '.task // ""' 2>/dev/null)
-topic=$(echo "$input" | jq -r '.topic // ""' 2>/dev/null)
+agent=$(printf "%s\n" "$input" | jq -r '.agent // ""' 2>/dev/null)
+task=$(printf "%s\n" "$input" | jq -r '.task // ""' 2>/dev/null)
+topic=$(printf "%s\n" "$input" | jq -r '.topic // ""' 2>/dev/null)
 
 # Validate agent name
 if [ -z "$agent" ] || [ "$agent" = "null" ]; then
@@ -88,17 +88,18 @@ NON_INTERACTIVE=1 \
     TASK="$task" \
     TOPIC="$topic" \
     BLACKBOARD_DB_PATH="$db" \
+    TEAM_DB_PATH="${TEAM_DB_PATH:-}" \
     bash "$main_script" >/dev/null 2>&1 &
 child_pid=$!
 
-# Wait up to 120 seconds
-deadline=$(( $(date +%s) + 120 ))
+# Wait up to 300 seconds (long for PM planning)
+deadline=$(( $(date +%s) + 300 ))
 while kill -0 "$child_pid" 2>/dev/null; do
     if [ "$(date +%s)" -ge "$deadline" ]; then
         kill -TERM "$child_pid" 2>/dev/null
         sleep 1
         kill -KILL "$child_pid" 2>/dev/null
-        echo "{\"success\":false,\"error\":\"agent '$agent' timed out after 120s\",\"parent_id\":$parent_id}"
+        echo "{\"success\":false,\"error\":\"agent '$agent' timed out after 300s\",\"parent_id\":$parent_id}"
         exit 1
     fi
     sleep 1
