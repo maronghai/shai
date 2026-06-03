@@ -460,25 +460,47 @@ _team_stop() {
     return 0
 }
 
-# _team_clear — wipe all tasks, events, and goal state
+# _team_clear — soft cancel: flip non-done tasks to 'cancelled' + clear goal.
+# Tasks in 'done' state are kept as-is (they represent completed work).
+# task_events rows are NOT deleted (audit trail stays).
+# For a true wipe, run `rm -f .data/team.db` from the shell.
+# usage: _team_clear [y]   (y = skip [y/N] prompt, for non-interactive use)
 _team_clear() {
-    local t_count e_count goal
+    local force="${1:-}"
+    local t_count c_count done_count goal
     t_count=$(sqlite3 -cmd 'PRAGMA foreign_keys=ON' "$TEAM_DB" "SELECT COUNT(*) FROM tasks" 2>/dev/null || echo 0)
-    e_count=$(sqlite3 -cmd 'PRAGMA foreign_keys=ON' "$TEAM_DB" "SELECT COUNT(*) FROM task_events" 2>/dev/null || echo 0)
+    c_count=$(sqlite3 -cmd 'PRAGMA foreign_keys=ON' "$TEAM_DB" "SELECT COUNT(*) FROM tasks WHERE status IN ('pending','claimed','in_progress','review','blocked')" 2>/dev/null || echo 0)
+    done_count=$(sqlite3 -cmd 'PRAGMA foreign_keys=ON' "$TEAM_DB" "SELECT COUNT(*) FROM tasks WHERE status='done'" 2>/dev/null || echo 0)
     goal=$(sqlite3 "$TEAM_DB" "SELECT value FROM team_state WHERE key='current_goal'" 2>/dev/null)
-    if [[ "$t_count" -eq 0 && "$e_count" -eq 0 && -z "$goal" ]]; then
-        ok "team already empty (0 tasks, 0 events, no goal)"
+
+    if [[ "$t_count" -eq 0 && -z "$goal" ]]; then
+        ok "team already empty (no tasks, no goal)"
         return 0
     fi
+
+    if [[ "$c_count" -gt 0 && "$force" != "y" && -t 0 ]]; then
+        local ans
+        read -r -p "cancel $c_count task(s)? [y/N] " ans
+        if [[ ! "$ans" =~ ^[Yy]$ ]]; then
+            ok "team clear cancelled (no changes)"
+            return 0
+        fi
+    fi
+
     sqlite3 -cmd 'PRAGMA foreign_keys=ON' "$TEAM_DB" <<SQL 2>/dev/null
-DELETE FROM task_events;
-DELETE FROM tasks;
-DELETE FROM team_state;
+UPDATE tasks SET status='cancelled', updated_at=datetime('now')
+  WHERE status IN ('pending','claimed','in_progress','review','blocked');
+DELETE FROM team_state WHERE key IN ('current_goal','current_goal_id');
 DELETE FROM sqlite_sequence;
 SQL
-    local goal_note=""
-    [[ -n "$goal" && "$goal" != "" ]] && goal_note=" (was goal: \"$goal\")"
-    ok "team cleared: $t_count tasks and $e_count events deleted${goal_note}"
+
+    if [[ "$c_count" -eq 0 && -n "$goal" ]]; then
+        ok "team goal cleared ($done_count done task(s) kept)"
+    elif [[ "$c_count" -eq 0 && -z "$goal" ]]; then
+        ok "team already empty (no tasks, no goal)"
+    else
+        ok "team cleared: $c_count task(s) cancelled ($done_count done kept), goal cleared"
+    fi
     return 0
 }
 
@@ -576,7 +598,7 @@ help() {
     echo "  /team start <goal>- Start a team session (PM breaks the goal into tasks)"
     echo "  /team next        - Dispatch the next ready task to its agent"
     echo "  /team stop        - Clear the current goal (keep tasks)"
-    echo "  /team clear       - Wipe all tasks + events + goal"
+    echo "  /team clear [-y]  - Soft cancel: flip non-done tasks to 'cancelled' + clear goal"
     echo "  /help             - Show this help"
     echo "  /reload           - Reload the program"
     echo "  /exit             - Exit"
@@ -1254,9 +1276,14 @@ while true; do
             _team_stop || warn "team stop failed"
             continue
             ;;
-        /team\ clear)
+        /team\ clear|/team\ clear\ *)
             init_team_db
-            _team_clear || warn "team clear failed"
+            arg="${input#/team clear}"
+            arg="${arg# }"
+            case "$arg" in
+                ""|-y|--yes) _team_clear y || warn "team clear failed" ;;
+                *) warn "usage: /team clear [-y|--yes]" ;;
+            esac
             continue
             ;;
         /hist\ *)

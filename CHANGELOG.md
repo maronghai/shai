@@ -168,10 +168,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     task `done` (coordinator can mark on behalf of any agent).
   - `/team stop` — clears `current_goal` and `current_goal_id` (does not
     delete tasks; the audit trail stays).
-  - `/team clear` — wipes `tasks` + `task_events` + `team_state` and resets
-    `sqlite_sequence`, so the queue is back to a fresh state. Idempotent
-    on an empty db (prints `team already empty`). Destructive — different
-    from `/team stop` in that the audit trail is also dropped.
+  - `/team clear [-y|--yes]` — **soft cancel**: updates `status='cancelled'`
+    on all non-done tasks (`pending` / `claimed` / `in_progress` / `review` /
+    `blocked`) and clears the goal. `done` tasks are kept as-is (they
+    represent completed work). `task_events` rows are **not** deleted
+    (audit trail stays). For a true wipe, run `rm -f .data/team.db` from
+    the shell. With `-y` / `--yes` (or non-interactive stdin) the
+    `cancel N task(s)? [y/N]` prompt is skipped.
   - **Fallback safety**: if the delegated agent never writes a board
     reply (e.g. the LLM hit a parse error mid-iteration), `/team next`
     still marks the task `done` with a `(no board reply from <agent>)`

@@ -1295,7 +1295,7 @@ pending / blocked / cancelled），每组下用紧凑一行展示。
 /team start <goal>     # 开新目标
 /team next             # 派发下一个 ready 任务
 /team stop             # 清空 goal（保留任务）
-/team clear            # 抹掉所有任务 + events + goal（不可恢复）
+/team clear [-y]       # 软取消：非 done 任务翻成 'cancelled' + 清 goal
 ```
 
 **`/team start <goal>` 做的事**：
@@ -1332,12 +1332,26 @@ pending / blocked / cancelled），每组下用紧凑一行展示。
 **`/team stop` 做的事**：清 `team_state.current_goal` 和
 `current_goal_id`。**不**删 tasks——历史是 audit trail，留着。
 
-**`/team clear` 做的事**：`DELETE FROM task_events; tasks; team_state;
-sqlite_sequence;`——把整个 team.db 抹成空 db。**不可恢复**——和 `/team stop`
-的差别就在这里：`stop` 是"暂停，审计留着"，`clear` 是"全部推倒重来"。
-幂等：空 db 再 `clear` 输出 `team already empty (0 tasks, 0 events, no goal)`。
-典型用途：跑完一次 demo 之后想再开一轮新 goal、又不想被旧任务污染 ready 队列
-（虽然 `status` 字段没 ready=1，但 audit 还在），就 `clear` 后 `start`。
+**`/team clear [-y|--yes]` 做的事**：**软取消**——把 `status` 为
+`pending` / `claimed` / `in_progress` / `review` / `blocked` 的任务翻成
+`cancelled`，清掉 `team_state` 里的 `current_goal` / `current_goal_id`，
+重置 `sqlite_sequence`（让新 task 从 1 开始）。**`done` 任务保持原样**——
+它们是已完成的工作，翻成 cancelled 是误导。**`task_events` 行不删**
+——审计 trail 完整保留。
+
+无 flag 时，若 stdin 是 tty 且有非 done 任务，提示 `cancel N task(s)? [y/N]`，
+回车默认 N（不取消）。`-y` / `--yes` 跳过 prompt。脚本化场景（管道喂入）
+自动跳过 prompt（`-t 0` 假）。
+
+**彻底抹掉 team.db 的方法**：`clear` 是软操作，不删行。要真删所有审计，shell 里
+跑 `rm -f .data/team.db`——下次 `/team` 会自动 `init_team_db` 重建（`CREATE TABLE
+IF NOT EXISTS`）。
+
+幂等：所有任务都是 done 或 cancelled、goal 也空时，`/team clear` 输出
+`team already empty (no tasks, no goal)`。
+
+典型用途：跑完一次 demo，想再开一轮新 goal、又不想被旧任务污染 ready 队列
+——`clear`（旧任务变 cancelled，不再算 ready，但 history 还在可 `/hist`）→ `start`。
 
 ### 14.6 manual-but-scripted 编排风格
 
