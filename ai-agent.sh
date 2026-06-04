@@ -23,7 +23,7 @@ AGENTS_DIR="${WORK_DIR}/agents"
 CURRENT_AGENT=""
 CURRENT_AGENT_FILE="$DATA_DIR/.current_agent"
 BLACKBOARD_DB="$DATA_DIR/blackboard.db"
-TEAM_DB="$DATA_DIR/team.db"
+TEAM_DB="${TEAM_DB_PATH:-$DATA_DIR/team.db}"
 TEAM_SCHEMA="$WORK_DIR/team/schema.sql"
 MAX_HISTORY=40
 
@@ -107,6 +107,8 @@ help() {
     echo "  /tasks <status>   - List tasks filtered by status (pending|done|...)"
     echo "  /tasks ready      - List pending tasks whose depends_on are all done"
     echo "  /task <id>        - Show one task with full event log"
+    echo "  /task clear       - Soft cancel: flip non-done tasks to 'cancelled' (done kept, goal kept, audit preserved)"
+    echo "  /task clear -y    - HARD full-wipe: remove ALL task rows + ALL events (incl. done, can't undo)"
     echo "  /team             - Show team status (current goal + tasks + ready)"
     echo "  /team start <goal>- Start a team session (PM breaks the goal into tasks)"
     echo "  /team next        - Dispatch the next ready task to its agent"
@@ -225,9 +227,20 @@ run_non_interactive() {
 You are a delegated sub-agent at depth $depth. Do NOT call any further delegation, recursive agent tools, or any tool that spawns new agents. Just answer the task directly with the tools you have."
     fi
 
-    tools_json=$(echo "$tools_json" | jq -c 'map(select(.function.name != "exec_command" and .function.name != "agent_delegate"))' 2>/dev/null) || true
-    tools_wire_json=$(echo "$tools_wire_json" | jq -c 'map(select(.function.name != "exec_command" and .function.name != "agent_delegate"))' 2>/dev/null) || true
-    tool_descriptions=$(echo "$tool_descriptions" | grep -v -E '(^| )(exec_command|agent_delegate)\(' 2>/dev/null || true)
+    # Defense in depth: sub-agents (any depth) never get `exec_command` --
+    # they should use read_file / grep_search instead of arbitrary shell.
+    #
+    # `agent_delegate` is gated by DELEGATION_DEPTH: depth 0 and 1 keep it
+    # (so a top-level orchestrator or a "team lead" sub-agent can fan out),
+    # depth >= 2 strips it (so a leaf worker cannot recursively spawn more).
+    # This matches the depth cap enforced in tools/agent_delegate.sh.
+    local jq_filter='.function.name != "exec_command"'
+    if (( depth >= 2 )); then jq_filter='.function.name != "exec_command" and .function.name != "agent_delegate"'; fi
+    tools_json=$(echo "$tools_json" | jq -c "map(select(${jq_filter}))" 2>/dev/null) || true
+    tools_wire_json=$(echo "$tools_wire_json" | jq -c "map(select(${jq_filter}))" 2>/dev/null) || true
+    local strip_desc='(^| )exec_command\('
+    if (( depth >= 2 )); then strip_desc='(^| )(exec_command|agent_delegate)\('; fi
+    tool_descriptions=$(echo "$tool_descriptions" | grep -v -E "$strip_desc" 2>/dev/null) || true
 
     local msgs_json
     msgs_json=$(build_base_messages)
@@ -483,19 +496,92 @@ while true; do
             ;;
         /tasks)
             init_team_db
-            TEAM_DB_PATH="$TEAM_DB" sh tools/task_list.sh '{}' | jq -r '.[] | "[\(.id) \(.status|tostring|.[0:4])/\(.type)] \(.assigned_to|if . == "" then "_" else . end) p=\(.priority) \(.title)"' 2>/dev/null || info "no tasks"
+            _list_tasks_out=$(TEAM_DB_PATH="$TEAM_DB" sh "$TOOLS_DIR/task_list.sh" '{}' | jq -r '.[] | "[\(.id) \(.status|tostring|.[0:4])/\(.type)] \(.assigned_to|if . == "" then "_" else . end) p=\(.priority) \(.title)"' 2>/dev/null)
+            if [[ -z "$_list_tasks_out" ]]; then info "no tasks"; else echo "$_list_tasks_out"; fi
+            continue
+            ;;
+        /tasks\ ready)
+            init_team_db
+            _list_tasks_out=$(TEAM_DB_PATH="$TEAM_DB" sh "$TOOLS_DIR/task_list.sh" '{"ready":1}' | jq -r '.[] | "[\(.id) \(.status|tostring|.[0:4])/\(.type)] \(.assigned_to|if . == "" then "_" else . end) p=\(.priority) \(.title)"' 2>/dev/null)
+            if [[ -z "$_list_tasks_out" ]]; then info "no ready tasks"; else echo "$_list_tasks_out"; fi
             continue
             ;;
         /tasks\ *)
             arg="${input#/tasks }"
             arg="${arg% }"
             init_team_db
-            TEAM_DB_PATH="$TEAM_DB" sh tools/task_list.sh "{\"status\":\"$arg\"}" | jq -r '.[] | "[\(.id) \(.status|tostring|.[0:4])/\(.type)] \(.assigned_to|if . == "" then "_" else . end) p=\(.priority) \(.title)"' 2>/dev/null || info "no tasks"
+            _list_tasks_out=$(TEAM_DB_PATH="$TEAM_DB" sh "$TOOLS_DIR/task_list.sh" "{\"status\":\"$arg\"}" | jq -r '.[] | "[\(.id) \(.status|tostring|.[0:4])/\(.type)] \(.assigned_to|if . == "" then "_" else . end) p=\(.priority) \(.title)"' 2>/dev/null)
+            if [[ -z "$_list_tasks_out" ]]; then info "no tasks with status '$arg'"; else echo "$_list_tasks_out"; fi
             continue
             ;;
-        /tasks\ ready)
+        /task)
+            warn "usage: /task <id>"
+            continue
+            ;;
+        /task\ clear*)
+            # /task clear         — soft-cancel non-done tasks (rows + done + audit preserved)
+            # /task clear -y      — HARD full-wipe: delete ALL task rows + ALL events (incl. done)
+            # In both modes, team_state.goal is untouched.
+            # The -y flag is the explicit "yes, I really want to wipe everything" opt-in;
+            # without it, the operation is the safe soft-cancel (idempotent, audit-preserving).
+            arg="${input#/task clear}"
+            arg="${arg# }"
+            arg="${arg% }"
+            if [[ "$arg" != "-y" && "$arg" != "--yes" && -n "$arg" ]]; then
+                warn "usage: /task clear [-y|--yes]"
+                continue
+            fi
             init_team_db
-            TEAM_DB_PATH="$TEAM_DB" sh tools/task_list.sh '{"ready":1}' | jq -r '.[] | "[\(.id) \(.status|tostring|.[0:4])/\(.type)] \(.assigned_to|if . == "" then "_" else . end) p=\(.priority) \(.title)"' 2>/dev/null || info "no ready tasks"
+            _tc_total=$(sqlite3 "$TEAM_DB" "SELECT COUNT(*) FROM tasks" 2>/dev/null)
+            _tc_canc=$(sqlite3 "$TEAM_DB" "SELECT COUNT(*) FROM tasks WHERE status IN ('pending','claimed','in_progress','review','blocked')" 2>/dev/null)
+            _tc_done=$(sqlite3 "$TEAM_DB" "SELECT COUNT(*) FROM tasks WHERE status='done'" 2>/dev/null)
+            _tc_already_canc=$(sqlite3 "$TEAM_DB" "SELECT COUNT(*) FROM tasks WHERE status='cancelled'" 2>/dev/null)
+            if [[ "${_tc_total:-0}" -eq 0 ]]; then
+                ok "task queue already empty"
+                continue
+            fi
+            if [[ "$arg" == "-y" || "$arg" == "--yes" ]]; then
+                # HARD full-wipe: prompts in TTY because it's destructive
+                if [[ -t 0 ]]; then
+                    _ans=""
+                    read -r -p "HARD WIPE: delete ALL $_tc_total task(s) + their events (incl. $_tc_done done, $_tc_already_canc cancelled)? [y/N] " _ans
+                    if [[ ! "$_ans" =~ ^[Yy]$ ]]; then
+                        ok "task clear aborted (no changes)"
+                        continue
+                    fi
+                fi
+                _task_clear_out=$(TEAM_DB_PATH="$TEAM_DB" sh "$TOOLS_DIR/task_clear.sh" '{"yes":true}' 2>&1)
+                if echo "$_task_clear_out" | jq -e '.success' >/dev/null 2>&1; then
+                    _c=$(echo "$_task_clear_out" | jq -r '.deleted')
+                    _e=$(echo "$_task_clear_out" | jq -r '.events_deleted')
+                    ok "FULL WIPE: deleted $_c task(s) + $_e event(s); goal untouched"
+                else
+                    warn "task clear failed: $(echo "$_task_clear_out" | jq -r '.error // "unknown"')"
+                fi
+            else
+                if [[ "${_tc_canc:-0}" -eq 0 ]]; then
+                    ok "nothing to soft-cancel ($_tc_done done + $_tc_already_canc cancelled kept, goal untouched)"
+                    continue
+                fi
+                # Soft cancel: prompt only in TTY (safe + idempotent)
+                if [[ -t 0 ]]; then
+                    _ans=""
+                    read -r -p "soft-cancel $_tc_canc task(s) (flip to 'cancelled', keep $_tc_done done, keep goal)? [y/N] " _ans
+                    if [[ ! "$_ans" =~ ^[Yy]$ ]]; then
+                        ok "task clear aborted (no changes)"
+                        continue
+                    fi
+                fi
+                _task_clear_out=$(TEAM_DB_PATH="$TEAM_DB" sh "$TOOLS_DIR/task_clear.sh" '{}' 2>&1)
+                if echo "$_task_clear_out" | jq -e '.success' >/dev/null 2>&1; then
+                    _c=$(echo "$_task_clear_out" | jq -r '.deleted')
+                    _d=$(echo "$_task_clear_out" | jq -r '.preserved_done')
+                    _k=$(echo "$_task_clear_out" | jq -r '.preserved_cancelled')
+                    ok "cancelled $_c task(s); kept $_d done + $_k cancelled; goal untouched"
+                else
+                    warn "task clear failed: $(echo "$_task_clear_out" | jq -r '.error // "unknown"')"
+                fi
+            fi
             continue
             ;;
         /task\ *)
@@ -506,7 +592,7 @@ while true; do
                 continue
             fi
             init_team_db
-            TEAM_DB_PATH="$TEAM_DB" sh tools/task_show.sh "{\"task_id\":$arg}" | jq -r '
+            TEAM_DB_PATH="$TEAM_DB" sh "$TOOLS_DIR/task_show.sh" "{\"task_id\":$arg}" | jq -r '
                 if .success then
                     (.task as $t |
                      [$t.id, $t.status, $t.title, ($t.depends_on // ""), ($t.description // ""), ($t.result // ""), ($t.artifacts // ""), $t.assigned_to, $t.priority, $t.type, (.events | length)] as $h |

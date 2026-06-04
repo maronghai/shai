@@ -614,6 +614,224 @@ else
   nok "/team clear case not wired"
 fi
 
+hr "Test 22: depth-aware tool stripping in run_non_interactive"
+
+# 22a: comment block explaining the policy exists
+if grep -qE 'Defense in depth|agent_delegate.{0,40}gated by DELEGATION_DEPTH' "${REPO}/ai-agent.sh"; then
+  ok "depth-aware strip has explanatory comment"
+else
+  nok "explanatory comment missing"
+fi
+
+# 22b: condition `(( depth >= 2 ))` exists in run_non_interactive
+if grep -qE 'depth >= 2' "${REPO}/ai-agent.sh"; then
+  ok "depth >= 2 check present"
+else
+  nok "depth >= 2 check missing"
+fi
+
+# 22c: agent_delegate is NOT hard-coded in the unconditional jq filter
+# (i.e. there should NOT be a single line that always strips both exec_command and agent_delegate)
+if grep -qE 'function\.name != "exec_command" and \.function\.name != "agent_delegate"\)\)' "${REPO}/ai-agent.sh"; then
+  nok "agent_delegate still hard-stripped unconditionally"
+else
+  ok "agent_delegate strip is conditional on depth"
+fi
+
+# 22d: exec_command is always stripped (defense in depth)
+if grep -qE 'jq_filter='\''.function\.name != "exec_command"' "${REPO}/ai-agent.sh"; then
+  ok "exec_command always stripped"
+else
+  nok "exec_command strip missing"
+fi
+
+# 22e: when depth >= 2, the filter should also strip agent_delegate
+# (look for the conditional branch adding the second clause)
+if grep -qE 'function\.name != "exec_command" and \.function\.name != "agent_delegate"'\''' "${REPO}/ai-agent.sh"; then
+  ok "depth >= 2 branch strips agent_delegate"
+else
+  nok "depth >= 2 branch does not add agent_delegate strip"
+fi
+
+# 22f: tool_descriptions grep is also conditional (exec_command always, agent_delegate only at depth >= 2)
+if grep -qF 'exec_command|agent_delegate' "${REPO}/ai-agent.sh"; then
+  ok "tool_descriptions grep branches on depth"
+else
+  nok "tool_descriptions grep is not depth-aware"
+fi
+
+hr "Test 23: /task and /tasks empty/no-arg cases"
+
+# Set up a fresh DB for these tests so we know exactly what tasks exist
+TEST_TEAM_DB=/tmp/ai-agent-test-23-$$.db
+export TEST_TEAM_DB
+cp "${REPO}/.data/team.db" "$TEST_TEAM_DB" 2>/dev/null || {
+  # If main DB missing, create a fresh one
+  mkdir -p "${REPO}/.data"
+  TEST_TEAM_DB="${REPO}/.data/team.db"
+  sqlite3 "$TEST_TEAM_DB" < "${REPO}/team/schema.sql"
+}
+
+# 23a: /task (no arg) shows usage hint instead of falling through to LLM
+out=$(echo -e "/task\nexit" | timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "usage: /task <id>" | head -1)
+[[ -n "$out" ]] && ok "/task (no arg) shows usage" || nok "/task (no arg) did not show usage: $out"
+
+# 23b: /task abc (non-numeric) still shows usage
+out=$(echo -e "/task abc\nexit" | timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "usage: /task <id>" | head -1)
+[[ -n "$out" ]] && ok "/task abc (non-numeric) shows usage" || nok "/task abc did not show usage: $out"
+
+# 23c: /task <id> with valid id still works (id 1 should exist in DB)
+out=$(echo -e "/task 1\nexit" | timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -E "^ID 1 \[")
+[[ -n "$out" ]] && ok "/task 1 (valid id) still works" || nok "/task 1 did not render: $out"
+
+# 23d: /task 9999 (missing id) shows error, not silent fall-through to LLM
+out=$(echo -e "/task 9999\nexit" | timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "task 9999 not found" | head -1)
+[[ -n "$out" ]] && ok "/task 9999 shows 'not found'" || nok "/task 9999 did not show not-found: $out"
+
+# 23e: /tasks with empty DB shows "no tasks" instead of being silent
+EMPTY_DB=/tmp/ai-agent-empty-$$.db
+sqlite3 "$EMPTY_DB" < "${REPO}/team/schema.sql" 2>/dev/null
+out=$(TEAM_DB_PATH="$EMPTY_DB" bash -c 'echo -e "/tasks\nexit" | timeout 3 bash "${REPO}/ai-agent.sh" 2>&1' REPO="${REPO}" | grep -F "no tasks" | head -1)
+[[ -n "$out" ]] && ok "/tasks (empty DB) shows 'no tasks'" || nok "/tasks (empty DB) silent: $out"
+
+# 23f: /tasks with status filter that matches nothing shows specific message
+out=$(TEAM_DB_PATH="$EMPTY_DB" bash -c 'echo -e "/tasks pending\nexit" | timeout 3 bash "${REPO}/ai-agent.sh" 2>&1' REPO="${REPO}" | grep -F "no tasks with status 'pending'" | head -1)
+[[ -n "$out" ]] && ok "/tasks pending (empty DB) shows 'no tasks with status'" || nok "/tasks pending silent: $out"
+
+# 23g: /tasks ready with no ready tasks shows "no ready tasks"
+out=$(TEAM_DB_PATH="$EMPTY_DB" bash -c 'echo -e "/tasks ready\nexit" | timeout 3 bash "${REPO}/ai-agent.sh" 2>&1' REPO="${REPO}" | grep -F "no ready tasks" | head -1)
+[[ -n "$out" ]] && ok "/tasks ready (empty DB) shows 'no ready tasks'" || nok "/tasks ready silent: $out"
+
+rm -f "$EMPTY_DB" "$TEST_TEAM_DB"
+
+# 23h: /task and /tasks work when run from a different cwd (paths must be absolute)
+out=$(cd /tmp && echo -e "/tasks\nexit" | timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -E "^\[.+(canc|done|pend|rev|bloc)/" | head -1)
+[[ -n "$out" ]] && ok "/tasks works from /tmp cwd" || nok "/tasks failed from /tmp: $(cd /tmp && echo -e "/tasks\nexit" | timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | tail -3)"
+
+out=$(cd /tmp && echo -e "/task 1\nexit" | timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -E "^ID 1 \[" | head -1)
+[[ -n "$out" ]] && ok "/task 1 works from /tmp cwd" || nok "/task 1 failed from /tmp"
+
+hr "Test 24: /task clear (soft) vs /task clear -y (hard)"
+
+# Helper: seed a DB with a known mix of tasks + a goal + a couple of events
+seed_t24_db() {
+    local db="$1"
+    sqlite3 "$db" "DELETE FROM tasks; DELETE FROM task_events; DELETE FROM team_state;"
+    TEAM_DB_PATH="$db" sh "${REPO}/tools/task_create.sh" '{"title":"p1","type":"code"}' >/dev/null
+    TEAM_DB_PATH="$db" sh "${REPO}/tools/task_create.sh" '{"title":"p2","type":"test"}' >/dev/null
+    TEAM_DB_PATH="$db" sh "${REPO}/tools/task_create.sh" '{"title":"d1","type":"docs"}' >/dev/null
+    sqlite3 "$db" "UPDATE tasks SET status='done' WHERE title='d1';"
+    # Add 1 created event per task so we can verify hard delete removes events
+    sqlite3 "$db" "INSERT INTO task_events (task_id,event) SELECT id,'created' FROM tasks;"
+    sqlite3 "$db" "INSERT INTO team_state (key,value) VALUES ('current_goal','keep me');"
+}
+
+T24_DB=/tmp/ai-agent-test-24-$$.db
+sqlite3 "$T24_DB" < "${REPO}/team/schema.sql" 2>/dev/null
+
+# 24a: help text mentions /task clear with both modes
+if grep -qE '/task clear' "${REPO}/ai-agent.sh" && \
+   grep -qE 'HARD delete|soft' "${REPO}/ai-agent.sh"; then
+  ok "help text shows both soft and hard modes"
+else
+  nok "help text missing mode description"
+fi
+
+# 24b: tool manifest exists with run.script
+if grep -q '"name": "task_clear"' "${REPO}/tools/task_clear.json" && \
+   grep -q '"script": "task_clear.sh"' "${REPO}/tools/task_clear.json"; then
+  ok "task_clear.json manifest valid"
+else
+  nok "task_clear.json manifest missing run.script"
+fi
+
+# 24c: tool script exists and is executable
+[[ -x "${REPO}/tools/task_clear.sh" ]] && ok "task_clear.sh exists and is executable" || nok "task_clear.sh missing or not executable"
+
+# === SOFT MODE (no -y) ===
+seed_t24_db "$T24_DB"
+
+# 24d: /task clear (bare) flips pending → cancelled, keeps done
+out=$(echo -e "/task clear\nexit" | TEAM_DB_PATH="$T24_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "cancelled 2" | head -1)
+[[ -n "$out" ]] && ok "/task clear (soft) reports cancelled=2" || nok "/task clear (soft) wrong: $out"
+
+# 24e: goal preserved (the key difference from /team clear)
+goal=$(sqlite3 "$T24_DB" "SELECT value FROM team_state WHERE key='current_goal';" 2>/dev/null)
+[[ "$goal" == "keep me" ]] && ok "goal preserved after soft /task clear" || nok "goal NOT preserved: '$goal'"
+
+# 24f: tasks state — 0 pending, 1 done, 2 cancelled (the 2 pending were flipped)
+canc_n=$(sqlite3 "$T24_DB" "SELECT COUNT(*) FROM tasks WHERE status='cancelled';" 2>/dev/null)
+done_n=$(sqlite3 "$T24_DB" "SELECT COUNT(*) FROM tasks WHERE status='done';" 2>/dev/null)
+[[ "$canc_n" == "2" && "$done_n" == "1" ]] && ok "soft: rows preserved (2 cancelled, 1 done)" || nok "soft: wrong state cancelled=$canc_n done=$done_n"
+
+# 24g: events preserved in soft mode (audit trail intact)
+# Note: each task gets 2 events (1 from task_create.sh, 1 from the seed INSERT),
+# so 3 tasks at seed time = 6 events; soft must preserve all 6.
+ev_n=$(sqlite3 "$T24_DB" "SELECT COUNT(*) FROM task_events;" 2>/dev/null)
+[[ "$ev_n" == "6" ]] && ok "soft: all 6 events preserved (audit intact)" || nok "soft: events wrong: $ev_n (expected 6)"
+
+# === HARD MODE (-y) — FULL WIPE (deletes ALL tasks incl. done) ===
+seed_t24_db "$T24_DB"
+
+# 24h: /task clear -y wipes ALL tasks + their events
+out=$(echo -e "/task clear -y\nexit" | TEAM_DB_PATH="$T24_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -E "^.*FULL WIPE: deleted 3 task\(s\) \+ [0-9]+ event\(s\)" | head -1)
+[[ -n "$out" ]] && ok "/task clear -y (hard) reports FULL WIPE 3 + events" || nok "/task clear -y wrong: $out"
+
+# 24i: goal STILL preserved in hard mode (only /team clear touches goal)
+goal=$(sqlite3 "$T24_DB" "SELECT value FROM team_state WHERE key='current_goal';" 2>/dev/null)
+[[ "$goal" == "keep me" ]] && ok "goal preserved after hard /task clear" || nok "hard: goal NOT preserved: '$goal'"
+
+# 24j: tasks table is EMPTY (incl. the previously done task)
+total=$(sqlite3 "$T24_DB" "SELECT COUNT(*) FROM tasks;" 2>/dev/null)
+[[ "$total" == "0" ]] && ok "hard: tasks table is empty (full wipe)" || nok "hard: tasks remaining: $total"
+
+# 24k: ALL events are gone (including the done task's)
+ev_n=$(sqlite3 "$T24_DB" "SELECT COUNT(*) FROM task_events;" 2>/dev/null)
+[[ "$ev_n" == "0" ]] && ok "hard: all events deleted (full audit wipe)" || nok "hard: events remaining: $ev_n"
+
+# === EDGE CASES ===
+seed_t24_db "$T24_DB"
+sqlite3 "$T24_DB" "UPDATE tasks SET status='cancelled' WHERE title IN ('p1','p2');"  # only d1 is done
+
+# 24l: /task clear on no-pending is idempotent (says "nothing to soft-cancel")
+out=$(echo -e "/task clear\nexit" | TEAM_DB_PATH="$T24_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "nothing to soft-cancel" | head -1)
+[[ -n "$out" ]] && ok "soft: idempotent (no pending)" || nok "soft: $out"
+
+# 24m: /task clear -y ALWAYS wipes (even if all tasks are already done/cancelled)
+out=$(echo -e "/task clear -y\nexit" | TEAM_DB_PATH="$T24_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "FULL WIPE: deleted 3" | head -1)
+[[ -n "$out" ]] && ok "hard: wipes even when nothing is pending" || nok "hard: $out"
+
+# 24n: /task clear foo → usage
+out=$(echo -e "/task clear foo\nexit" | TEAM_DB_PATH="$T24_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "usage: /task clear [-y|--yes]" | head -1)
+[[ -n "$out" ]] && ok "/task clear bogus shows usage" || nok "bogus: $out"
+
+# 24o: /task clear --yes also triggers hard mode
+seed_t24_db "$T24_DB"
+out=$(echo -e "/task clear --yes\nexit" | TEAM_DB_PATH="$T24_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -E "^.*FULL WIPE: deleted 3 task\(s\)" | head -1)
+[[ -n "$out" ]] && ok "/task clear --yes triggers hard mode" || nok "--yes: $out"
+
+# 24p: tool task_clear.sh soft mode (bypass REPL) — direct invocation
+seed_t24_db "$T24_DB"
+direct=$(TEAM_DB_PATH="$T24_DB" sh "${REPO}/tools/task_clear.sh" '{}')
+mode=$(echo "$direct" | jq -r '.mode')
+deleted=$(echo "$direct" | jq -r '.deleted')
+[[ "$mode" == "soft" && "$deleted" == "2" ]] && ok "tool soft: mode=soft deleted=2 (2 pending)" || nok "tool soft: $direct"
+
+# 24q: tool task_clear.sh hard mode (direct) — wipes all
+seed_t24_db "$T24_DB"
+direct=$(TEAM_DB_PATH="$T24_DB" sh "${REPO}/tools/task_clear.sh" '{"yes":true}')
+mode=$(echo "$direct" | jq -r '.mode')
+deleted=$(echo "$direct" | jq -r '.deleted')
+ev=$(echo "$direct" | jq -r '.events_deleted')
+[[ "$mode" == "hard" && "$deleted" == "3" && "$ev" -ge 3 ]] && ok "tool hard: mode=hard deleted=3 events>=$ev" || nok "tool hard: $direct"
+
+# 24r: hard wipe is truly destructive — re-running soft after hard finds nothing
+out=$(TEAM_DB_PATH="$T24_DB" sh "${REPO}/tools/task_clear.sh" '{}')
+deleted=$(echo "$out" | jq -r '.deleted')
+[[ "$deleted" == "0" ]] && ok "after hard wipe, soft finds 0" || nok "soft after hard: $out"
+
+rm -f "$T24_DB"
+
 hr "Summary"
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"

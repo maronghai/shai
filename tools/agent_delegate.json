@@ -2,7 +2,7 @@
   "type": "function",
   "function": {
     "name": "agent_delegate",
-    "description": "Delegate a task to another named agent (defined under agents/<name>/system.md). The sub-agent runs in a separate process with NON_INTERACTIVE=1, with exec_command and agent_delegate hard-removed from its toolset, and a max iteration cap. The sub-agent's final reply is returned. Maximum delegation depth is 2.",
+    "description": "Delegate a task to another named agent (defined under agents/<name>/system.md). The sub-agent runs in a separate process with NON_INTERACTIVE=1. `exec_command` is always stripped (defense in depth); `agent_delegate` is stripped only when the sub-agent would be at depth >= 2 (i.e. a grandchild), so depth-1 sub-agents can still fan out. A max iteration cap also applies. The sub-agent's final reply is returned. Maximum delegation depth is 2.",
     "parameters": {
       "type": "object",
       "properties": {
