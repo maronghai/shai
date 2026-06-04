@@ -1,0 +1,25 @@
+{
+  "type": "function",
+  "function": {
+    "name": "board_clear",
+    "description": "Clear blackboard entries for a topic. Two modes — soft (default) renames the topic to '[cleared] <topic>' so the rows stay around (audit-preserving, idempotent). Hard (pass {\"yes\":true}) DELETEs all rows with that topic (cannot be undone — there's no board-level audit log). For a true wipe of EVERYTHING on the blackboard regardless of topic, use `rm -f .data/blackboard.db`.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "topic": {
+          "type": "string",
+          "description": "The topic to clear (must match exactly — wildcards not supported; use multiple calls for prefix-based clearing)"
+        },
+        "yes": {
+          "type": "boolean",
+          "description": "If true, perform a HARD full-wipe (DELETE all rows for that topic). Default false = soft rename to '[cleared] <topic>' (rows preserved, audit trail preserved)."
+        }
+      },
+      "required": ["topic"]
+    }
+  },
+  "run": {
+    "interpreter": "sh",
+    "script": "board_clear.sh"
+  }
+}

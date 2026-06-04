@@ -4,6 +4,7 @@
 #   lib/db.sh    — DB primitives, history, /hist dumpers
 #   lib/team.sh  — /team workflow dispatcher
 #   lib/agent.sh — persona switching, listing, REPL prompt
+#   lib/cmd.sh   — slash-command "did you mean" suggestions
 set -euo pipefail
 WORK_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -22,7 +23,7 @@ HISTSIZE=1000
 AGENTS_DIR="${WORK_DIR}/agents"
 CURRENT_AGENT=""
 CURRENT_AGENT_FILE="$DATA_DIR/.current_agent"
-BLACKBOARD_DB="$DATA_DIR/blackboard.db"
+BLACKBOARD_DB="${BLACKBOARD_DB_PATH:-$DATA_DIR/blackboard.db}"
 TEAM_DB="${TEAM_DB_PATH:-$DATA_DIR/team.db}"
 TEAM_SCHEMA="$WORK_DIR/team/schema.sql"
 MAX_HISTORY=40
@@ -35,6 +36,7 @@ mkdir -p "$DATA_DIR" "$TEMP_DIR"
 . "$WORK_DIR/lib/db.sh"
 . "$WORK_DIR/lib/team.sh"
 . "$WORK_DIR/lib/agent.sh"
+. "$WORK_DIR/lib/cmd.sh"
 
 # Restore last-used agent (if any)
 if [[ -f "$CURRENT_AGENT_FILE" ]]; then
@@ -51,7 +53,15 @@ TOOLS_CACHE="$DATA_DIR/tools_cache${CURRENT_AGENT:+_$CURRENT_AGENT}.json"
 TOOLS_DESC_CACHE="$DATA_DIR/tools_desc${CURRENT_AGENT:+_$CURRENT_AGENT}.txt"
 
 trap 'history -w 2>/dev/null || true' EXIT
-trap 'echo; history -w 2>/dev/null || true; exit 0' INT
+
+# Safer Ctrl+C: writing a timestamp is the only thing the trap does.
+# The main REPL loop reads the timestamp and decides whether to:
+#   (a) show a "use /exit to quit" hint and clear the line (first press)
+#   (b) actually exit (second press within INT_WINDOW seconds)
+# This avoids one-shot exit on accidental Ctrl+C at the prompt.
+_INT_TS_FILE="$TEMP_DIR/.int_ts"
+_INT_WINDOW=2
+trap 'printf "%s" "$(date +%s)" > "$_INT_TS_FILE" 2>/dev/null' INT
 
 SYSTEM_PROMPT="$(load_system_prompt)"
 
@@ -102,7 +112,14 @@ help() {
     echo "  /agent reload     - Reload current agent's prompt + tools"
     echo "  /agents           - List all available agents (numbered; with description and tags)
   /agents @tag      - List agents whose frontmatter tags include @tag"
-    echo "  /board [topic]    - List blackboard topics or show entries for a topic"
+    echo "  /board                        - List all blackboard topics (with counts)"
+    echo "  /board write <topic> <msg>    - Write a new entry to a topic"
+    echo "  /board reply <id> <msg>       - Write a reply to entry <id> (same topic)"
+    echo "  /board clear <topic> [-y]     - Soft: rename '[cleared] <topic>' | -y: DELETE rows"
+    echo "  /board topics [prefix]        - List distinct topics (optional prefix filter)"
+    echo "  /board grep <pattern>         - Search payloads across all topics (SQL LIKE)"
+    echo "  /board stat                   - Overall stats + by-agent breakdown"
+    echo "  /board <topic> [opts] [<id>]  - List entries; --since <id> | -n <N> | <id> for full payload"
     echo "  /tasks            - List all tasks (compact)"
     echo "  /tasks <status>   - List tasks filtered by status (pending|done|...)"
     echo "  /tasks ready      - List pending tasks whose depends_on are all done"
@@ -118,7 +135,7 @@ help() {
     echo "  /reload           - Reload the program"
     echo "  /exit             - Exit"
     echo ""
-    echo -e "${C}Tip:${R} Use Ctrl+C to interrupt response, Ctrl+D to exit."
+    echo -e "${C}Tip:${R} Ctrl+C clears the current line (press twice in 2s to quit, or use /exit / Ctrl+D)."
 }
 
 tools_json=""
@@ -419,8 +436,42 @@ echo -e "Type ${C}/help${R} for commands"
 echo -e "Prompt shows current agent (e.g. ${G}You [default]${R} vs ${Y}You [code-reviewer]${R})"
 echo ""
 
+_INT_LAST_SEEN=0
+
 while true; do
-    IFS= read -e -p "$(_agent_prompt)" -r input || { echo; exit 0; }
+    IFS= read -e -p "$(_agent_prompt)" -r input || {
+        # read returned non-zero. Two reasons:
+        #   (1) SIGINT (Ctrl+C): the trap wrote a timestamp to $_INT_TS_FILE
+        #   (2) EOF (Ctrl+D on empty line)
+        # For (1), use double-tap-to-exit: first press shows a hint, second
+        # press within $_INT_WINDOW seconds actually exits. For (2), exit
+        # cleanly — that's the documented way out.
+        if [[ -f "$_INT_TS_FILE" ]]; then
+            _now=$(date +%s)
+            _last=$(cat "$_INT_TS_FILE" 2>/dev/null || echo 0)
+            rm -f "$_INT_TS_FILE"
+            if (( _now - _last <= 1 )) \
+               && (( _INT_LAST_SEEN > 0 )) \
+               && (( _now - _INT_LAST_SEEN <= _INT_WINDOW )); then
+                # Double-tap: actually exit
+                echo
+                history -w 2>/dev/null || true
+                exit 0
+            fi
+            # First press: read already discarded the line, just show hint
+            _INT_LAST_SEEN=$_last
+            warn "(Ctrl+C — line cleared. Type /exit, press Ctrl+D, or Ctrl+C again within ${_INT_WINDOW}s to quit.)"
+            input=""
+            continue
+        fi
+        # EOF (Ctrl+D on empty line) or some other read error
+        echo
+        history -w 2>/dev/null || true
+        exit 0
+    }
+    # A successful read resets the double-tap window
+    _INT_LAST_SEEN=0
+    rm -f "$_INT_TS_FILE" 2>/dev/null || true
     input="${input%"${input##*[![:space:]]}"}"
     [[ -z "$input" ]] && continue
     history -s "$input"
@@ -484,14 +535,259 @@ while true; do
             continue
             ;;
         /board)
-            sqlite3 -header -column "$BLACKBOARD_DB" "SELECT topic, COUNT(*) as msgs, MAX(created_at) as last FROM board GROUP BY topic ORDER BY last DESC" 2>/dev/null || info "blackboard is empty"
+            # Topic summary table (existing behavior). Shows count + last
+            # write per topic, ordered by most-recent first.
+            sqlite3 -header -column "$BLACKBOARD_DB" \
+                "SELECT topic, COUNT(*) AS msgs, MAX(created_at) AS last FROM board GROUP BY topic ORDER BY last DESC" 2>/dev/null \
+                || info "blackboard is empty"
+            continue
+            ;;
+        /board\ write\ *)
+            # /board write <topic> <payload...>
+            # Topic is the first whitespace-delimited token; the REST of
+            # the input is the payload (may contain spaces, including
+            # multi-line via $'...' on the shell side).
+            _arg="${input#/board write }"
+            _topic="${_arg%% *}"
+            _payload="${_arg#"$_topic"}"
+            _payload="${_payload# }"   # strip leading single space
+            if [[ -z "$_topic" || -z "$_payload" ]]; then
+                warn "usage: /board write <topic> <payload>"
+                continue
+            fi
+            _j_topic=$(printf '%s' "$_topic"  | jq -Rsr 'if . == "" then "\"\"" else @json end')
+            _j_pl=$(printf '%s' "$_payload"   | jq -Rsr 'if . == "" then "\"\"" else @json end')
+            _out=$(AGENT_NAME="$CURRENT_AGENT" BLACKBOARD_DB_PATH="$BLACKBOARD_DB" \
+                sh "$TOOLS_DIR/board_write.sh" \
+                "{\"topic\":${_j_topic},\"payload\":${_j_pl}}" 2>&1)
+            if printf '%s' "$_out" | jq -e '.success' >/dev/null 2>&1; then
+                _id=$(printf '%s' "$_out" | jq -r '.id')
+                ok "board write ok: id=$_id topic=$_topic"
+            else
+                warn "board write failed: $_out"
+            fi
+            continue
+            ;;
+        /board\ reply\ *)
+            # /board reply <id> <payload...>  →  INSERT with reply_to=id
+            _arg="${input#/board reply }"
+            _id="${_arg%% *}"
+            _payload="${_arg#"$_id"}"
+            _payload="${_payload# }"
+            if [[ -z "$_id" || -z "$_payload" ]] || ! [[ "$_id" =~ ^[0-9]+$ ]]; then
+                warn "usage: /board reply <id> <payload>"
+                continue
+            fi
+            # Look up the source entry's topic to use the same topic.
+            # Falls back to "replies" if the source id is missing.
+            _topic=$(bb_sql "SELECT topic FROM board WHERE id = $_id" | tail -1)
+            [[ -z "$_topic" ]] && _topic="replies"
+            _j_topic=$(printf '%s' "$_topic"  | jq -Rsr 'if . == "" then "\"\"" else @json end')
+            _j_pl=$(printf '%s' "$_payload"   | jq -Rsr 'if . == "" then "\"\"" else @json end')
+            _out=$(AGENT_NAME="$CURRENT_AGENT" BLACKBOARD_DB_PATH="$BLACKBOARD_DB" \
+                sh "$TOOLS_DIR/board_write.sh" \
+                "{\"topic\":${_j_topic},\"payload\":${_j_pl},\"reply_to\":${_id}}" 2>&1)
+            if printf '%s' "$_out" | jq -e '.success' >/dev/null 2>&1; then
+                _nid=$(printf '%s' "$_out" | jq -r '.id')
+                ok "board reply ok: id=$_nid reply_to=$_id topic=$_topic"
+            else
+                warn "board reply failed: $_out"
+            fi
+            continue
+            ;;
+        /board\ clear\ *)
+            # /board clear <topic> [-y]
+            # Bare = soft (rename topic to "[cleared] <topic>").  -y = hard
+            # (DELETE all rows for that topic — irreversible).  Mirrors
+            # the /task clear semantics so the mental model is uniform.
+            _arg="${input#/board clear}"
+            _arg="${_arg# }"
+            _topic="${_arg%% *}"
+            _rest="${_arg#"$_topic"}"
+            _rest="${_rest# }"
+            _rest="${_rest% }"
+            _hard="false"
+            if [[ "$_rest" == "-y" || "$_rest" == "--yes" ]]; then
+                _hard="true"
+            elif [[ -n "$_rest" ]]; then
+                warn "usage: /board clear <topic> [-y]"
+                continue
+            fi
+            if [[ -z "$_topic" ]]; then
+                warn "usage: /board clear <topic> [-y]"
+                continue
+            fi
+            _j_topic=$(printf '%s' "$_topic" | jq -Rsr 'if . == "" then "\"\"" else @json end')
+            if [[ "$_hard" == "true" ]]; then
+                _out=$(AGENT_NAME="$CURRENT_AGENT" BLACKBOARD_DB_PATH="$BLACKBOARD_DB" \
+                    sh "$TOOLS_DIR/board_clear.sh" \
+                    "{\"topic\":${_j_topic},\"yes\":true}" 2>&1)
+            else
+                # Show impact first (count) for the soft path so the user
+                # can decide whether to -y it.  Skip in non-TTY (tests).
+                _n=$(bb_sql "SELECT COUNT(*) FROM board WHERE topic = $(bb_quote "$_topic")" | tail -1)
+                if [[ -z "$_n" || "$_n" == "0" ]]; then
+                    info "board clear: no entries for topic '$_topic'"
+                    continue
+                fi
+                if [[ -t 0 ]]; then
+                    read -r -p "soft-clear '$_topic' ($_n entries) — type 'yes' to confirm: " _ans
+                    if [[ "$_ans" != "yes" ]]; then
+                        info "aborted"
+                        continue
+                    fi
+                fi
+                _out=$(AGENT_NAME="$CURRENT_AGENT" BLACKBOARD_DB_PATH="$BLACKBOARD_DB" \
+                    sh "$TOOLS_DIR/board_clear.sh" \
+                    "{\"topic\":${_j_topic}}" 2>&1)
+            fi
+            if printf '%s' "$_out" | jq -e '.success' >/dev/null 2>&1; then
+                _mode=$(printf '%s' "$_out" | jq -r '.mode')
+                _aff=$(printf '%s' "$_out" | jq -r '.affected // .deleted // 0')
+                ok "board clear ok: mode=$_mode topic=$_topic affected=$_aff"
+            else
+                warn "board clear failed: $_out"
+            fi
+            continue
+            ;;
+        /board\ topics*)
+            # /board topics [prefix] — uses the board_list tool so the
+            # tool path stays the source of truth.
+            _arg="${input#/board topics}"
+            _arg="${_arg# }"
+            _arg="${_arg% }"
+            if [[ -n "$_arg" ]]; then
+                _j=$(printf '%s' "$_arg" | jq -Rsr 'if . == "" then "\"\"" else @json end')
+                _out=$(BLACKBOARD_DB_PATH="$BLACKBOARD_DB" sh "$TOOLS_DIR/board_list.sh" "{\"prefix\":${_j}}")
+            else
+                _out=$(BLACKBOARD_DB_PATH="$BLACKBOARD_DB" sh "$TOOLS_DIR/board_list.sh" '{}')
+            fi
+            if [[ -z "$_out" || "$_out" == "[]" ]]; then
+                info "no topics"
+            else
+                printf '%s\n' "$_out" | jq -r '.[] | (if type == "object" then .topic else . end)' | sed 's/^/  /'
+            fi
+            continue
+            ;;
+        /board\ grep\ *)
+            # /board grep <pattern>  — LIKE search across ALL topics'
+            # payloads.  Useful when you don't remember the topic name.
+            #   - Pattern is SQL LIKE syntax: % wildcard, _ single char
+            #   - Outputs id, agent, topic, snippet (first 80 chars)
+            _pat="${input#/board grep }"
+            _pat="${_pat% }"
+            if [[ -z "$_pat" ]]; then
+                warn "usage: /board grep <pattern>  (SQL LIKE: % = any)"
+                continue
+            fi
+            _j=$(printf '%s' "$_pat" | jq -Rsr 'if . == "" then "\"\"" else @json end')
+            # We can run board_list once for topic discovery, then
+            # per-topic LIKE search.  Simpler: one cross-topic SQL.
+            _esc=$(printf '%s' "$_pat" | sed "s/'/''/g")
+            echo "== grep '$_pat' =="
+            _hits=$(sqlite3 -header -column "$BLACKBOARD_DB" \
+                "SELECT id, agent, topic, substr(payload,1,80) AS snippet, created_at FROM board WHERE payload LIKE '%$_esc%' ORDER BY id" 2>/dev/null)
+            if [[ -z "$_hits" ]]; then
+                info "no matches"
+            else
+                printf '%s\n' "$_hits"
+            fi
+            continue
+            ;;
+        /board\ stat)
+            # /board stat — overall dashboard
+            echo "== board stat =="
+            sqlite3 -header -column "$BLACKBOARD_DB" \
+                "SELECT 'total entries' AS metric, COUNT(*) AS value FROM board
+                 UNION ALL SELECT 'distinct topics', COUNT(DISTINCT topic) FROM board
+                 UNION ALL SELECT 'agents (with entries)', COUNT(DISTINCT NULLIF(agent,'')) FROM board
+                 UNION ALL SELECT 'replies (reply_to IS NOT NULL)', COUNT(*) FROM board WHERE reply_to IS NOT NULL
+                 UNION ALL SELECT 'earliest entry', MIN(created_at) FROM board
+                 UNION ALL SELECT 'latest entry', MAX(created_at) FROM board" 2>/dev/null \
+                || info "blackboard is empty"
+            echo ""
+            echo "-- by agent --"
+            sqlite3 -header -column "$BLACKBOARD_DB" \
+                "SELECT agent, COUNT(*) AS entries, COUNT(DISTINCT topic) AS topics FROM board GROUP BY agent ORDER BY entries DESC" 2>/dev/null \
+                || true
             continue
             ;;
         /board\ *)
-            arg="${input#/board }"
-            arg="${arg% }"
-            echo "== board topic='$arg' =="
-            sqlite3 -header -column "$BLACKBOARD_DB" "SELECT id, agent, substr(payload,1,80) as payload, COALESCE(reply_to,'') as reply_to, created_at FROM board WHERE topic = $(bb_quote "$arg") ORDER BY id" 2>/dev/null || info "no entries"
+            # /board <topic> [opts...] [<id>]
+            #   --since <id>  show only entries with id > N
+            #   -n <N>        limit (default 50, max 500)
+            #   <id>          show one entry in full (overrides list mode)
+            # The first token is always the topic.
+            _arg="${input#/board }"
+            _arg="${_arg% }"
+            _topic="${_arg%% *}"
+            _rest="${_arg#"$_topic"}"
+            _rest="${_rest# }"
+            _since=0
+            _limit=50
+            _single_id=""
+            # Parse _rest in a loop so flags can come in any order.
+            while [[ -n "$_rest" ]]; do
+                _tok="${_rest%% *}"
+                _rest="${_rest#"$_tok"}"
+                _rest="${_rest# }"
+                case "$_tok" in
+                    --since)
+                        _next="${_rest%% *}"
+                        _rest="${_rest#"$_next"}"
+                        _rest="${_rest# }"
+                        if [[ "$_next" =~ ^[0-9]+$ ]]; then
+                            _since="$_next"
+                        else
+                            warn "--since expects an integer id, got '$_next'"
+                            continue 2
+                        fi
+                        ;;
+                    -n)
+                        _next="${_rest%% *}"
+                        _rest="${_rest#"$_next"}"
+                        _rest="${_rest# }"
+                        if [[ "$_next" =~ ^[0-9]+$ ]] && (( _next >= 1 )) && (( _next <= 500 )); then
+                            _limit="$_next"
+                        else
+                            warn "-n expects 1..500, got '$_next'"
+                            continue 2
+                        fi
+                        ;;
+                    -*)
+                        warn "unknown /board flag: $_tok"
+                        continue 2
+                        ;;
+                    *)
+                        # Bare number = single-id request
+                        if [[ "$_tok" =~ ^[0-9]+$ ]] && [[ -z "$_single_id" ]]; then
+                            _single_id="$_tok"
+                        else
+                            warn "unexpected extra arg: $_tok"
+                            continue 2
+                        fi
+                        ;;
+                esac
+            done
+            if [[ -n "$_single_id" ]]; then
+                # Show one entry in full
+                echo "== board entry id=$_single_id =="
+                sqlite3 -header -line "$BLACKBOARD_DB" \
+                    "SELECT id, agent, topic, reply_to, payload, created_at FROM board WHERE id = $_single_id" 2>/dev/null \
+                    || warn "no entry with id=$_single_id"
+                continue
+            fi
+            # List mode (composed: --since + -n)
+            echo "== board topic='$_topic' since=$_since limit=$_limit =="
+            _j_t=$(printf '%s' "$_topic" | jq -Rsr 'if . == "" then "\"\"" else @json end')
+            _out=$(BLACKBOARD_DB_PATH="$BLACKBOARD_DB" sh "$TOOLS_DIR/board_read.sh" \
+                "{\"topic\":${_j_t},\"since_id\":${_since},\"limit\":${_limit}}" 2>/dev/null)
+            if [[ -z "$_out" || "$_out" == "[]" ]]; then
+                info "no entries"
+            else
+                printf '%s\n' "$_out" \
+                    | jq -r '.[] | "[\(.id)] \(.created_at) \(.agent|if . == "" then "_" else . end) rt=\(.reply_to // 0)\n  \(.payload)"'
+            fi
             continue
             ;;
         /tasks)
@@ -689,6 +985,28 @@ while true; do
                 ok "Saved to $save_path"
             else
                 warn "No response to save"
+            fi
+            continue
+            ;;
+        /*)
+            # Unknown slash command. Try to suggest the closest match(es)
+            # via Levenshtein; if nothing is close enough, fall back to
+            # /help. Either way, NEVER fall through to the LLM for a bare
+            # /-command — the user clearly meant a built-in.
+            _suggested=$(_suggest_command "$input" 3) || _suggested=""
+            if [[ -n "$_suggested" ]]; then
+                warn "unknown command: $input"
+                warn "did you mean:"
+                _i=1
+                while IFS= read -r _s; do
+                    [[ -z "$_s" ]] && continue
+                    warn "  $_i. $_s"
+                    _i=$((_i+1))
+                done <<< "$_suggested"
+            else
+                warn "unknown command: $input"
+                warn "no similar command found — showing /help"
+                help
             fi
             continue
             ;;

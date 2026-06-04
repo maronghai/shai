@@ -42,4 +42,4 @@ if [ -z "$new_id" ] || [ "$new_id" = "0" ]; then
 fi
 topic_j=$(printf '%s' "$topic" | jq -Rsr 'if . == "" then "\"\"" else @json end')
 agent_j=$(printf '%s' "$agent" | jq -Rsr 'if . == "" then "\"\"" else @json end')
-jq -nc --argjson id "$new_id" --argjson agent "$agent_j" --argjson topic "$topic_j" '{id:$id, agent:$agent, topic:$topic}'
+jq -nc --argjson id "$new_id" --argjson agent "$agent_j" --argjson topic "$topic_j" '{success:true,id:$id,agent:$agent,topic:$topic}'

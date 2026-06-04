@@ -832,6 +832,141 @@ deleted=$(echo "$out" | jq -r '.deleted')
 
 rm -f "$T24_DB"
 
+hr "Test 25: /board subcommands (write / reply / clear / topics / grep / stat / since / -n / <id>)"
+
+# Helper: seed a blackboard with a known mix
+seed_t25_bb() {
+    local db="$1"
+    rm -f "$db"
+    sqlite3 "$db" "CREATE TABLE IF NOT EXISTS board (id INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT NOT NULL DEFAULT '', topic TEXT NOT NULL, payload TEXT NOT NULL, reply_to INTEGER, created_at TEXT DEFAULT (datetime('now'))); CREATE INDEX IF NOT EXISTS idx_board_topic ON board(topic);" 2>/dev/null
+    BLACKBOARD_DB_PATH="$db" AGENT_NAME="alice" sh "${REPO}/tools/board_write.sh" '{"topic":"plan","payload":"step 1"}' >/dev/null
+    BLACKBOARD_DB_PATH="$db" AGENT_NAME="alice" sh "${REPO}/tools/board_write.sh" '{"topic":"plan","payload":"step 2 — see also review notes"}' >/dev/null
+    BLACKBOARD_DB_PATH="$db" AGENT_NAME="bob"   sh "${REPO}/tools/board_write.sh" '{"topic":"review","payload":"looks ok"}' >/dev/null
+}
+
+T25_DB=/tmp/ai-agent-test-25-$$.db
+seed_t25_bb "$T25_DB"
+
+# 25a: help text mentions the new subcommands
+if grep -qE '/board write' "${REPO}/ai-agent.sh" && \
+   grep -qE '/board reply' "${REPO}/ai-agent.sh" && \
+   grep -qE '/board clear' "${REPO}/ai-agent.sh" && \
+   grep -qE '/board topics' "${REPO}/ai-agent.sh" && \
+   grep -qE '/board grep' "${REPO}/ai-agent.sh" && \
+   grep -qE '/board stat' "${REPO}/ai-agent.sh"; then
+  ok "help text shows all 6 new subcommands"
+else
+  nok "help text missing some subcommand"
+fi
+
+# 25b: /board (no arg) shows topic summary table
+out=$(echo -e "/board\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -E "^plan\b" | head -1)
+[[ -n "$out" ]] && ok "/board (no arg) shows topic summary" || nok "/board summary missing: $out"
+
+# 25c: /board write <topic> <payload> inserts a new entry
+out=$(echo -e "/board write plan step 3\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "board write ok" | head -1)
+[[ -n "$out" ]] && ok "/board write reports success" || nok "/board write failed: $out"
+n=$(sqlite3 "$T25_DB" "SELECT COUNT(*) FROM board WHERE topic='plan'")
+[[ "$n" == "3" ]] && ok "/board write inserted 1 entry (3 total in plan)" || nok "/board write: expected 3 in 'plan', got $n"
+
+# 25d: /board write with no payload shows usage
+out=$(echo -e "/board write plan\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "usage: /board write" | head -1)
+[[ -n "$out" ]] && ok "/board write (no payload) shows usage" || nok "/board write no-payload: $out"
+
+# 25e: /board reply <id> <payload> creates a reply in the same topic
+out=$(echo -e "/board reply 1 ack from tester\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "board reply ok" | head -1)
+[[ -n "$out" ]] && ok "/board reply reports success" || nok "/board reply failed: $out"
+n=$(sqlite3 "$T25_DB" "SELECT COUNT(*) FROM board WHERE reply_to=1")
+[[ "$n" == "1" ]] && ok "/board reply set reply_to=1" || nok "/board reply: expected 1 reply_to=1, got $n"
+
+# 25f: /board <topic> lists entries (existing 80-char behavior)
+out=$(echo -e "/board plan\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "step 1" | head -1)
+[[ -n "$out" ]] && ok "/board <topic> lists entries" || nok "/board <topic>: $out"
+
+# 25g: /board <topic> <id> shows full payload of one entry
+out=$(echo -e "/board plan 2\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "review notes" | head -1)
+[[ -n "$out" ]] && ok "/board <topic> <id> shows full payload" || nok "/board single id: $out"
+
+# 25h: /board <topic> --since <id> filters
+out=$(echo -e "/board plan --since 1\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "step 1" | head -1)
+[[ -z "$out" ]] && ok "/board plan --since 1 hides id=1" || nok "--since 1 leaked: $out"
+n=$(echo -e "/board plan --since 1\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -cE '^\[2\]|^\[3\]|^\[4\]|^\[5\]')
+[[ "$n" -ge 1 ]] && ok "/board plan --since 1 shows entries with id>1" || nok "--since 1: expected >=1 entry, got $n"
+
+# 25i: /board <topic> -n <N> limits
+out=$(echo -e "/board plan -n 1\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -cE '^\[[0-9]+\]')
+[[ "$out" == "1" ]] && ok "/board plan -n 1 returns exactly 1 entry" || nok "/board -n 1: expected 1, got $out"
+
+# 25j: /board topics [prefix] uses the board_list tool
+out=$(echo -e "/board topics\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "plan" | head -1)
+[[ -n "$out" ]] && ok "/board topics lists distinct topics" || nok "/board topics: $out"
+out=$(echo -e "/board topics rev\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "review" | head -1)
+[[ -n "$out" ]] && ok "/board topics rev filters by prefix" || nok "/board topics rev: $out"
+
+# 25k: /board grep <pattern> searches payloads across all topics
+out=$(echo -e "/board grep step\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "step 1" | head -1)
+[[ -n "$out" ]] && ok "/board grep step finds matching entries" || nok "/board grep: $out"
+out=$(echo -e "/board grep nonexistent_pattern_xyz\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "no matches" | head -1)
+[[ -n "$out" ]] && ok "/board grep no-match shows 'no matches'" || nok "/board grep no-match: $out"
+
+# 25l: /board stat shows totals
+out=$(echo -e "/board stat\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "total entries" | head -1)
+[[ -n "$out" ]] && ok "/board stat shows totals" || nok "/board stat: $out"
+out=$(echo -e "/board stat\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "alice" | head -1)
+[[ -n "$out" ]] && ok "/board stat breaks down by agent" || nok "/board stat by-agent: $out"
+
+# 25m: /board clear <topic> (soft) renames the topic
+seed_t25_bb "$T25_DB"
+out=$(echo -e "/board clear plan\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "board clear ok: mode=soft" | head -1)
+[[ -n "$out" ]] && ok "/board clear soft reports success" || nok "/board clear soft: $out"
+n=$(sqlite3 "$T25_DB" "SELECT COUNT(*) FROM board WHERE topic='[cleared] plan'")
+[[ "$n" == "2" ]] && ok "soft clear renamed 2 rows to '[cleared] plan'" || nok "soft clear: expected 2 in '[cleared] plan', got $n"
+
+# 25n: /board clear <topic> -y (hard) DELETEs the rows
+seed_t25_bb "$T25_DB"
+out=$(echo -e "/board clear plan -y\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "board clear ok: mode=hard" | head -1)
+[[ -n "$out" ]] && ok "/board clear -y reports hard success" || nok "/board clear -y: $out"
+n=$(sqlite3 "$T25_DB" "SELECT COUNT(*) FROM board WHERE topic='plan'")
+[[ "$n" == "0" ]] && ok "hard clear deleted all 2 'plan' rows" || nok "hard clear: expected 0 'plan', got $n"
+
+# 25o: /board clear with bogus arg shows usage
+out=$(echo -e "/board clear plan foo\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "usage: /board clear" | head -1)
+[[ -n "$out" ]] && ok "/board clear bogus shows usage" || nok "/board clear bogus: $out"
+
+# 25p: /board clear is idempotent (running again finds 0)
+seed_t25_bb "$T25_DB"
+echo -e "/board clear plan -y\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" >/dev/null 2>&1
+out=$(echo -e "/board clear plan\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "no entries for topic" | head -1)
+[[ -n "$out" ]] && ok "/board clear (no entries) shows 'no entries'" || nok "/board clear idempotent: $out"
+
+# 25q: tool board_clear.sh — direct soft invocation
+seed_t25_bb "$T25_DB"
+direct=$(BLACKBOARD_DB_PATH="$T25_DB" sh "${REPO}/tools/board_clear.sh" '{"topic":"plan"}')
+mode=$(echo "$direct" | jq -r '.mode')
+affected=$(echo "$direct" | jq -r '.affected')
+[[ "$mode" == "soft" && "$affected" == "2" ]] && ok "tool soft: mode=soft affected=2" || nok "tool soft: $direct"
+
+# 25r: tool board_clear.sh — direct hard invocation
+seed_t25_bb "$T25_DB"
+direct=$(BLACKBOARD_DB_PATH="$T25_DB" sh "${REPO}/tools/board_clear.sh" '{"topic":"review","yes":true}')
+mode=$(echo "$direct" | jq -r '.mode')
+deleted=$(echo "$direct" | jq -r '.deleted')
+[[ "$mode" == "hard" && "$deleted" == "1" ]] && ok "tool hard: mode=hard deleted=1" || nok "tool hard: $direct"
+
+# 25s: tool board_write.sh now returns success:true
+seed_t25_bb "$T25_DB"
+direct=$(BLACKBOARD_DB_PATH="$T25_DB" AGENT_NAME="carol" sh "${REPO}/tools/board_write.sh" '{"topic":"x","payload":"y"}')
+success=$(echo "$direct" | jq -r '.success')
+id=$(echo "$direct" | jq -r '.id')
+[[ "$success" == "true" && -n "$id" && "$id" != "null" ]] && ok "tool board_write returns success:true + id" || nok "tool board_write: $direct"
+
+# 25t: --since and -n can be combined
+seed_t25_bb "$T25_DB"
+out=$(echo -e "/board plan --since 1 -n 1\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -cE '^\[[0-9]+\]')
+[[ "$out" == "1" ]] && ok "/board plan --since 1 -n 1 returns 1 entry" || nok "combined opts: expected 1, got $out"
+
+rm -f "$T25_DB"
+
 hr "Summary"
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"
