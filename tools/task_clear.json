@@ -1,0 +1,20 @@
+{
+  "type": "function",
+  "function": {
+    "name": "task_clear",
+    "description": "Clear the task queue. Two modes — soft (default) flips pending|claimed|in_progress|review|blocked to 'cancelled' (done/cancelled tasks preserved, rows + audit trail intact); hard (pass {\"yes\":true}) DELETES EVERY task row + EVERY task_event row from the table (full wipe — done, cancelled, pending, all gone, audit trail gone, cannot be undone). In both modes, team_state (goal) is NOT modified — use /team clear for that. Soft is idempotent. For a true wipe of everything in team.db (incl. team_state), use `rm -f .data/team.db`.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "yes": {
+          "type": "boolean",
+          "description": "If true, perform a HARD full-wipe (delete ALL task rows + ALL task_events). Default false = soft cancel (flip pending/claimed/.../blocked status to 'cancelled'; done and cancelled tasks untouched)."
+        }
+      }
+    }
+  },
+  "run": {
+    "interpreter": "sh",
+    "script": "task_clear.sh"
+  }
+}
