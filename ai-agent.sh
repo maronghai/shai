@@ -5,6 +5,7 @@
 #   lib/team.sh  — /team workflow dispatcher
 #   lib/agent.sh — persona switching, listing, REPL prompt
 #   lib/cmd.sh   — slash-command "did you mean" suggestions
+#   lib/complete.sh — TAB completion in the REPL
 set -euo pipefail
 WORK_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -37,6 +38,7 @@ mkdir -p "$DATA_DIR" "$TEMP_DIR"
 . "$WORK_DIR/lib/team.sh"
 . "$WORK_DIR/lib/agent.sh"
 . "$WORK_DIR/lib/cmd.sh"
+. "$WORK_DIR/lib/complete.sh"
 
 # Restore last-used agent (if any)
 if [[ -f "$CURRENT_AGENT_FILE" ]]; then

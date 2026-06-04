@@ -967,6 +967,204 @@ out=$(echo -e "/board plan --since 1 -n 1\nexit" | BLACKBOARD_DB_PATH="$T25_DB" 
 
 rm -f "$T25_DB"
 
+hr "Test 26: TAB completion (lib/complete.sh)"
+
+# Helper: simulate a TAB press in the REPL by sourcing lib/complete.sh
+# (which binds \C-i to _ai_complete), then setting READLINE_LINE/POINT
+# and calling _ai_complete. The function may either mutate
+# READLINE_LINE (single/multi candidate with extension) or print
+# candidates to stderr (multi candidate with no extension). We test
+# both modes.
+simulate_tab() {
+    # args: initial_line [point]
+    local line="$1" point="${2:-${#1}}"
+    (
+        # Subshell so the in-process state doesn't leak
+        # shellcheck disable=SC1090
+        . "${REPO}/lib/complete.sh"
+        READLINE_LINE="$line"
+        READLINE_POINT="$point"
+        # Capture stderr (candidate listing) and the final READLINE state
+        exec 3>&2
+        _ai_complete 2>/tmp/ai-tab-stderr.$$
+        local out_line="$READLINE_LINE"
+        local out_point="$READLINE_POINT"
+        exec 2>&3
+        # Use a delimiter that never appears in the line: |@|
+        printf '|@|LINE|%s|%d|ENDLINE|@|\n' "$out_line" "$out_point"
+        if [[ -s /tmp/ai-tab-stderr.$$ ]]; then
+            printf '|@|CANDIDATES|@|\n'
+            cat /tmp/ai-tab-stderr.$$
+            printf '|@|ENDCANDS|@|\n'
+        fi
+        rm -f /tmp/ai-tab-stderr.$$
+    )
+}
+
+# Helper: extract a tagged field from simulate_tab output.
+# usage: extract_field "tagname" "$output"
+extract_field() {
+    local tag="$1" out="$2"
+    # Match "|@|TAG|...|ENDTAG|" or "|@|TAG|something|ENDTAG|"
+    # First try the "line" form with point suffix
+    if [[ "$tag" == "LINE" ]]; then
+        printf '%s' "$out" | sed -n 's/.*|@|LINE|\(.*\)|[0-9]*|ENDLINE|@|.*/\1/p'
+    elif [[ "$tag" == "POINT" ]]; then
+        printf '%s' "$out" | sed -n 's/.*|@|LINE|.*|\([0-9]*\)|ENDLINE|@|.*/\1/p'
+    elif [[ "$tag" == "CANDIDATES" ]]; then
+        # Multi-line: extract between CANDIDATES and ENDCANDS markers
+        printf '%s' "$out" | awk '
+            /\|@\|CANDIDATES\|@\|/ {f=1; next}
+            /\|@\|ENDCANDS\|@\|/ {f=0}
+            f
+        '
+    fi
+}
+
+# 26a: lib/complete.sh exists and is sourced by ai-agent.sh
+[[ -f "${REPO}/lib/complete.sh" ]] && ok "lib/complete.sh exists" || nok "lib/complete.sh missing"
+if grep -q 'lib/complete.sh' "${REPO}/ai-agent.sh"; then
+    ok "ai-agent.sh sources lib/complete.sh"
+else
+    nok "ai-agent.sh does not source lib/complete.sh"
+fi
+
+# 26b: TAB handler is bound to \C-i
+if grep -qE 'bind -x.*_ai_complete' "${REPO}/lib/complete.sh"; then
+    ok "TAB bound to _ai_complete via bind -x"
+else
+    nok "no bind -x for _ai_complete"
+fi
+
+# 26c: /age → /agent (single-cmd completion)
+out=$(simulate_tab "/age")
+got_line=$(extract_field LINE "$out")
+got_point=$(extract_field POINT "$out")
+if [[ "$got_line" == "/agent" ]] && [[ "$got_point" == "6" ]]; then
+    ok "/age completes to /agent"
+else
+    nok "/age did not complete: line=[$got_line] point=[$got_point]"
+fi
+
+# 26d: /b → /board (extend to LCP of /board*)
+out=$(simulate_tab "/b")
+got_line=$(extract_field LINE "$out")
+got_point=$(extract_field POINT "$out")
+if [[ "$got_line" == "/board" ]] && [[ "$got_point" == "6" ]]; then
+    ok "/b extends to /board"
+else
+    nok "/b did not extend: line=[$got_line] point=[$got_point]"
+fi
+
+# 26e: /agent (already a complete command) lists candidates
+out=$(simulate_tab "/agent")
+cands=$(extract_field CANDIDATES "$out")
+if [[ -n "$cands" && "$cands" == *"/agent reload"* && "$cands" == *"/agents"* ]]; then
+    ok "/agent lists /agent reload + /agents as candidates"
+else
+    nok "/agent did not list: [$cands]"
+fi
+
+# 26f: /board + space → lists subcommands (write, reply, ...)
+out=$(simulate_tab "/board " 7)
+cands=$(extract_field CANDIDATES "$out")
+if [[ -n "$cands" && "$cands" == *"write"* && "$cands" == *"reply"* && "$cands" == *"clear"* ]]; then
+    ok "/board (with space) lists subcommands"
+else
+    nok "/board (space) did not list: [$cands]"
+fi
+
+# 26g: /board w → /board write (single subcommand)
+out=$(simulate_tab "/board w")
+got_line=$(extract_field LINE "$out")
+got_point=$(extract_field POINT "$out")
+if [[ "$got_line" == "/board write" ]] && [[ "$got_point" == "12" ]]; then
+    ok "/board w completes to /board write"
+else
+    nok "/board w did not complete: line=[$got_line] point=[$got_point]"
+fi
+
+# 26h: /board cle → /board clear (single subcommand match)
+out=$(simulate_tab "/board cle")
+got_line=$(extract_field LINE "$out")
+got_point=$(extract_field POINT "$out")
+if [[ "$got_line" == "/board clear" ]] && [[ "$got_point" == "12" ]]; then
+    ok "/board cle completes to /board clear"
+else
+    nok "/board cle did not complete: line=[$got_line] point=[$got_point]"
+fi
+
+# 26i: /task clear - → lists -y and --yes
+out=$(simulate_tab "/task clear -" 12)
+cands=$(extract_field CANDIDATES "$out")
+if [[ -n "$cands" && "$cands" == *"-y"* && "$cands" == *"--yes"* ]]; then
+    ok "/task clear - lists -y/--yes flags"
+else
+    nok "/task clear - did not list flags: [$cands]"
+fi
+
+# 26j: /xyz → no change (no candidates)
+out=$(simulate_tab "/xyz")
+got_line=$(extract_field LINE "$out")
+got_point=$(extract_field POINT "$out")
+cands=$(extract_field CANDIDATES "$out")
+if [[ "$got_line" == "/xyz" ]] && [[ "$got_point" == "4" ]] && [[ -z "$cands" ]]; then
+    ok "/xyz (no match) leaves line unchanged"
+else
+    nok "/xyz behavior wrong: line=[$got_line] cands=[$cands]"
+fi
+
+# 26k: hello (non-/command) → no change
+out=$(simulate_tab "hello")
+got_line=$(extract_field LINE "$out")
+got_point=$(extract_field POINT "$out")
+cands=$(extract_field CANDIDATES "$out")
+if [[ "$got_line" == "hello" ]] && [[ "$got_point" == "5" ]] && [[ -z "$cands" ]]; then
+    ok "hello (non-/command) leaves line unchanged"
+else
+    nok "hello behavior wrong: line=[$got_line] cands=[$cands]"
+fi
+
+# 26l: empty line → lists all commands
+out=$(simulate_tab "" 0)
+cands=$(extract_field CANDIDATES "$out")
+if [[ -n "$cands" && "$cands" == *"/board"* && "$cands" == *"/task"* && "$cands" == *"/team"* ]]; then
+    ok "empty line lists all commands"
+else
+    nok "empty line did not list: [$cands]"
+fi
+
+# 26m: /team (parent command itself) → list /team* candidates
+out=$(simulate_tab "/team")
+cands=$(extract_field CANDIDATES "$out")
+if [[ -n "$cands" && "$cands" == *"/team start"* && "$cands" == *"/team clear"* ]]; then
+    ok "/team lists subcommands (start, clear, etc.)"
+else
+    nok "/team did not list: [$cands]"
+fi
+
+# 26n: regex meta-chars in current are escaped (no false matches / no crash)
+out=$(simulate_tab "/.\\")
+cands=$(extract_field CANDIDATES "$out")
+# /. is not a known command, so we expect no line change AND no candidates.
+# This proves the regex meta-char `\.` was escaped (no grep crash, no injection).
+got_line=$(extract_field LINE "$out")
+if [[ "$got_line" == "/.\\" ]] && [[ -z "$cands" ]]; then
+    ok "regex meta-chars in /pattern handled safely (no crash, no match)"
+else
+    nok "regex meta-chars: line=[$got_line] cands=[$cands]"
+fi
+
+# 26o: /board + space with cursor at end-of-parent (cursor-mid scenario)
+out=$(simulate_tab "/board " 6)
+# At pt=6, prefix=/board, current="" (cursor right after the parent)
+cands=$(extract_field CANDIDATES "$out")
+if [[ -n "$cands" && "$cands" == *"write"* && "$cands" == *"reply"* ]]; then
+    ok "cursor at end of /board lists subcommands"
+else
+    nok "cursor-mid: [$cands]"
+fi
+
 hr "Summary"
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"
