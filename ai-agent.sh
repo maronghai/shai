@@ -24,8 +24,7 @@ HISTSIZE=1000
 AGENTS_DIR="${WORK_DIR}/agents"
 CURRENT_AGENT=""
 CURRENT_AGENT_FILE="$DATA_DIR/.current_agent"
-BLACKBOARD_DB="${BLACKBOARD_DB_PATH:-$DATA_DIR/blackboard.db}"
-TEAM_DB="${TEAM_DB_PATH:-$DATA_DIR/team.db}"
+AI_AGENT_DB="${AI_AGENT_DB:-$DATA_DIR/ai-agent.db}"
 TEAM_SCHEMA="$WORK_DIR/team/schema.sql"
 MAX_HISTORY=40
 
@@ -50,7 +49,7 @@ if [[ -f "$CURRENT_AGENT_FILE" ]]; then
     fi
 fi
 
-DB_PATH=$(db_path)
+AI_AGENT_DB="${AI_AGENT_DB:-$DATA_DIR/ai-agent.db}"
 TOOLS_CACHE="$DATA_DIR/tools_cache${CURRENT_AGENT:+_$CURRENT_AGENT}.json"
 TOOLS_DESC_CACHE="$DATA_DIR/tools_desc${CURRENT_AGENT:+_$CURRENT_AGENT}.txt"
 
@@ -88,7 +87,7 @@ run_tool() {
         echo "Error: tool '$name' has no run.script"
         return 1
     fi
-    AGENT_NAME="$CURRENT_AGENT" BLACKBOARD_DB_PATH="$BLACKBOARD_DB" \
+    AGENT_NAME="$CURRENT_AGENT" AI_AGENT_DB="$AI_AGENT_DB" \
     WORK_DIR="$WORK_DIR" AGENTS_DIR="$AGENTS_DIR" \
     DELEGATION_DEPTH="${DELEGATION_DEPTH:-0}" \
         "$interpreter" "$TOOLS_DIR/$script_path" "$args"
@@ -539,7 +538,7 @@ while true; do
         /board)
             # Topic summary table (existing behavior). Shows count + last
             # write per topic, ordered by most-recent first.
-            sqlite3 -header -column "$BLACKBOARD_DB" \
+            sqlite3 -header -column "$AI_AGENT_DB" \
                 "SELECT topic, COUNT(*) AS msgs, MAX(created_at) AS last FROM board GROUP BY topic ORDER BY last DESC" 2>/dev/null \
                 || info "blackboard is empty"
             continue
@@ -559,7 +558,7 @@ while true; do
             fi
             _j_topic=$(printf '%s' "$_topic"  | jq -Rsr 'if . == "" then "\"\"" else @json end')
             _j_pl=$(printf '%s' "$_payload"   | jq -Rsr 'if . == "" then "\"\"" else @json end')
-            _out=$(AGENT_NAME="$CURRENT_AGENT" BLACKBOARD_DB_PATH="$BLACKBOARD_DB" \
+            _out=$(AGENT_NAME="$CURRENT_AGENT" AI_AGENT_DB="$AI_AGENT_DB" \
                 sh "$TOOLS_DIR/board_write.sh" \
                 "{\"topic\":${_j_topic},\"payload\":${_j_pl}}" 2>&1)
             if printf '%s' "$_out" | jq -e '.success' >/dev/null 2>&1; then
@@ -586,7 +585,7 @@ while true; do
             [[ -z "$_topic" ]] && _topic="replies"
             _j_topic=$(printf '%s' "$_topic"  | jq -Rsr 'if . == "" then "\"\"" else @json end')
             _j_pl=$(printf '%s' "$_payload"   | jq -Rsr 'if . == "" then "\"\"" else @json end')
-            _out=$(AGENT_NAME="$CURRENT_AGENT" BLACKBOARD_DB_PATH="$BLACKBOARD_DB" \
+            _out=$(AGENT_NAME="$CURRENT_AGENT" AI_AGENT_DB="$AI_AGENT_DB" \
                 sh "$TOOLS_DIR/board_write.sh" \
                 "{\"topic\":${_j_topic},\"payload\":${_j_pl},\"reply_to\":${_id}}" 2>&1)
             if printf '%s' "$_out" | jq -e '.success' >/dev/null 2>&1; then
@@ -621,7 +620,7 @@ while true; do
             fi
             _j_topic=$(printf '%s' "$_topic" | jq -Rsr 'if . == "" then "\"\"" else @json end')
             if [[ "$_hard" == "true" ]]; then
-                _out=$(AGENT_NAME="$CURRENT_AGENT" BLACKBOARD_DB_PATH="$BLACKBOARD_DB" \
+                _out=$(AGENT_NAME="$CURRENT_AGENT" AI_AGENT_DB="$AI_AGENT_DB" \
                     sh "$TOOLS_DIR/board_clear.sh" \
                     "{\"topic\":${_j_topic},\"yes\":true}" 2>&1)
             else
@@ -639,7 +638,7 @@ while true; do
                         continue
                     fi
                 fi
-                _out=$(AGENT_NAME="$CURRENT_AGENT" BLACKBOARD_DB_PATH="$BLACKBOARD_DB" \
+                _out=$(AGENT_NAME="$CURRENT_AGENT" AI_AGENT_DB="$AI_AGENT_DB" \
                     sh "$TOOLS_DIR/board_clear.sh" \
                     "{\"topic\":${_j_topic}}" 2>&1)
             fi
@@ -660,9 +659,9 @@ while true; do
             _arg="${_arg% }"
             if [[ -n "$_arg" ]]; then
                 _j=$(printf '%s' "$_arg" | jq -Rsr 'if . == "" then "\"\"" else @json end')
-                _out=$(BLACKBOARD_DB_PATH="$BLACKBOARD_DB" sh "$TOOLS_DIR/board_list.sh" "{\"prefix\":${_j}}")
+                _out=$(AI_AGENT_DB="$AI_AGENT_DB" sh "$TOOLS_DIR/board_list.sh" "{\"prefix\":${_j}}")
             else
-                _out=$(BLACKBOARD_DB_PATH="$BLACKBOARD_DB" sh "$TOOLS_DIR/board_list.sh" '{}')
+                _out=$(AI_AGENT_DB="$AI_AGENT_DB" sh "$TOOLS_DIR/board_list.sh" '{}')
             fi
             if [[ -z "$_out" || "$_out" == "[]" ]]; then
                 info "no topics"
@@ -687,7 +686,7 @@ while true; do
             # per-topic LIKE search.  Simpler: one cross-topic SQL.
             _esc=$(printf '%s' "$_pat" | sed "s/'/''/g")
             echo "== grep '$_pat' =="
-            _hits=$(sqlite3 -header -column "$BLACKBOARD_DB" \
+            _hits=$(sqlite3 -header -column "$AI_AGENT_DB" \
                 "SELECT id, agent, topic, substr(payload,1,80) AS snippet, created_at FROM board WHERE payload LIKE '%$_esc%' ORDER BY id" 2>/dev/null)
             if [[ -z "$_hits" ]]; then
                 info "no matches"
@@ -699,7 +698,7 @@ while true; do
         /board\ stat)
             # /board stat — overall dashboard
             echo "== board stat =="
-            sqlite3 -header -column "$BLACKBOARD_DB" \
+            sqlite3 -header -column "$AI_AGENT_DB" \
                 "SELECT 'total entries' AS metric, COUNT(*) AS value FROM board
                  UNION ALL SELECT 'distinct topics', COUNT(DISTINCT topic) FROM board
                  UNION ALL SELECT 'agents (with entries)', COUNT(DISTINCT NULLIF(agent,'')) FROM board
@@ -709,7 +708,7 @@ while true; do
                 || info "blackboard is empty"
             echo ""
             echo "-- by agent --"
-            sqlite3 -header -column "$BLACKBOARD_DB" \
+            sqlite3 -header -column "$AI_AGENT_DB" \
                 "SELECT agent, COUNT(*) AS entries, COUNT(DISTINCT topic) AS topics FROM board GROUP BY agent ORDER BY entries DESC" 2>/dev/null \
                 || true
             continue
@@ -774,7 +773,7 @@ while true; do
             if [[ -n "$_single_id" ]]; then
                 # Show one entry in full
                 echo "== board entry id=$_single_id =="
-                sqlite3 -header -line "$BLACKBOARD_DB" \
+                sqlite3 -header -line "$AI_AGENT_DB" \
                     "SELECT id, agent, topic, reply_to, payload, created_at FROM board WHERE id = $_single_id" 2>/dev/null \
                     || warn "no entry with id=$_single_id"
                 continue
@@ -782,7 +781,7 @@ while true; do
             # List mode (composed: --since + -n)
             echo "== board topic='$_topic' since=$_since limit=$_limit =="
             _j_t=$(printf '%s' "$_topic" | jq -Rsr 'if . == "" then "\"\"" else @json end')
-            _out=$(BLACKBOARD_DB_PATH="$BLACKBOARD_DB" sh "$TOOLS_DIR/board_read.sh" \
+            _out=$(AI_AGENT_DB="$AI_AGENT_DB" sh "$TOOLS_DIR/board_read.sh" \
                 "{\"topic\":${_j_t},\"since_id\":${_since},\"limit\":${_limit}}" 2>/dev/null)
             if [[ -z "$_out" || "$_out" == "[]" ]]; then
                 info "no entries"
@@ -794,13 +793,13 @@ while true; do
             ;;
         /tasks)
             init_team_db
-            _list_tasks_out=$(TEAM_DB_PATH="$TEAM_DB" sh "$TOOLS_DIR/task_list.sh" '{}' | jq -r '.[] | "[\(.id) \(.status|tostring|.[0:4])/\(.type)] \(.assigned_to|if . == "" then "_" else . end) p=\(.priority) \(.title)"' 2>/dev/null)
+            _list_tasks_out=$(AI_AGENT_DB="$AI_AGENT_DB" sh "$TOOLS_DIR/task_list.sh" '{}' | jq -r '.[] | "[\(.id) \(.status|tostring|.[0:4])/\(.type)] \(.assigned_to|if . == "" then "_" else . end) p=\(.priority) \(.title)"' 2>/dev/null)
             if [[ -z "$_list_tasks_out" ]]; then info "no tasks"; else echo "$_list_tasks_out"; fi
             continue
             ;;
         /tasks\ ready)
             init_team_db
-            _list_tasks_out=$(TEAM_DB_PATH="$TEAM_DB" sh "$TOOLS_DIR/task_list.sh" '{"ready":1}' | jq -r '.[] | "[\(.id) \(.status|tostring|.[0:4])/\(.type)] \(.assigned_to|if . == "" then "_" else . end) p=\(.priority) \(.title)"' 2>/dev/null)
+            _list_tasks_out=$(AI_AGENT_DB="$AI_AGENT_DB" sh "$TOOLS_DIR/task_list.sh" '{"ready":1}' | jq -r '.[] | "[\(.id) \(.status|tostring|.[0:4])/\(.type)] \(.assigned_to|if . == "" then "_" else . end) p=\(.priority) \(.title)"' 2>/dev/null)
             if [[ -z "$_list_tasks_out" ]]; then info "no ready tasks"; else echo "$_list_tasks_out"; fi
             continue
             ;;
@@ -808,7 +807,7 @@ while true; do
             arg="${input#/tasks }"
             arg="${arg% }"
             init_team_db
-            _list_tasks_out=$(TEAM_DB_PATH="$TEAM_DB" sh "$TOOLS_DIR/task_list.sh" "{\"status\":\"$arg\"}" | jq -r '.[] | "[\(.id) \(.status|tostring|.[0:4])/\(.type)] \(.assigned_to|if . == "" then "_" else . end) p=\(.priority) \(.title)"' 2>/dev/null)
+            _list_tasks_out=$(AI_AGENT_DB="$AI_AGENT_DB" sh "$TOOLS_DIR/task_list.sh" "{\"status\":\"$arg\"}" | jq -r '.[] | "[\(.id) \(.status|tostring|.[0:4])/\(.type)] \(.assigned_to|if . == "" then "_" else . end) p=\(.priority) \(.title)"' 2>/dev/null)
             if [[ -z "$_list_tasks_out" ]]; then info "no tasks with status '$arg'"; else echo "$_list_tasks_out"; fi
             continue
             ;;
@@ -830,10 +829,10 @@ while true; do
                 continue
             fi
             init_team_db
-            _tc_total=$(sqlite3 "$TEAM_DB" "SELECT COUNT(*) FROM tasks" 2>/dev/null)
-            _tc_canc=$(sqlite3 "$TEAM_DB" "SELECT COUNT(*) FROM tasks WHERE status IN ('pending','claimed','in_progress','review','blocked')" 2>/dev/null)
-            _tc_done=$(sqlite3 "$TEAM_DB" "SELECT COUNT(*) FROM tasks WHERE status='done'" 2>/dev/null)
-            _tc_already_canc=$(sqlite3 "$TEAM_DB" "SELECT COUNT(*) FROM tasks WHERE status='cancelled'" 2>/dev/null)
+            _tc_total=$(sqlite3 "$AI_AGENT_DB" "SELECT COUNT(*) FROM tasks" 2>/dev/null)
+            _tc_canc=$(sqlite3 "$AI_AGENT_DB" "SELECT COUNT(*) FROM tasks WHERE status IN ('pending','claimed','in_progress','review','blocked')" 2>/dev/null)
+            _tc_done=$(sqlite3 "$AI_AGENT_DB" "SELECT COUNT(*) FROM tasks WHERE status='done'" 2>/dev/null)
+            _tc_already_canc=$(sqlite3 "$AI_AGENT_DB" "SELECT COUNT(*) FROM tasks WHERE status='cancelled'" 2>/dev/null)
             if [[ "${_tc_total:-0}" -eq 0 ]]; then
                 ok "task queue already empty"
                 continue
@@ -848,7 +847,7 @@ while true; do
                         continue
                     fi
                 fi
-                _task_clear_out=$(TEAM_DB_PATH="$TEAM_DB" sh "$TOOLS_DIR/task_clear.sh" '{"yes":true}' 2>&1)
+                _task_clear_out=$(AI_AGENT_DB="$AI_AGENT_DB" sh "$TOOLS_DIR/task_clear.sh" '{"yes":true}' 2>&1)
                 if echo "$_task_clear_out" | jq -e '.success' >/dev/null 2>&1; then
                     _c=$(echo "$_task_clear_out" | jq -r '.deleted')
                     _e=$(echo "$_task_clear_out" | jq -r '.events_deleted')
@@ -870,7 +869,7 @@ while true; do
                         continue
                     fi
                 fi
-                _task_clear_out=$(TEAM_DB_PATH="$TEAM_DB" sh "$TOOLS_DIR/task_clear.sh" '{}' 2>&1)
+                _task_clear_out=$(AI_AGENT_DB="$AI_AGENT_DB" sh "$TOOLS_DIR/task_clear.sh" '{}' 2>&1)
                 if echo "$_task_clear_out" | jq -e '.success' >/dev/null 2>&1; then
                     _c=$(echo "$_task_clear_out" | jq -r '.deleted')
                     _d=$(echo "$_task_clear_out" | jq -r '.preserved_done')
@@ -890,7 +889,7 @@ while true; do
                 continue
             fi
             init_team_db
-            TEAM_DB_PATH="$TEAM_DB" sh "$TOOLS_DIR/task_show.sh" "{\"task_id\":$arg}" | jq -r '
+            AI_AGENT_DB="$AI_AGENT_DB" sh "$TOOLS_DIR/task_show.sh" "{\"task_id\":$arg}" | jq -r '
                 if .success then
                     (.task as $t |
                      [$t.id, $t.status, $t.title, ($t.depends_on // ""), ($t.description // ""), ($t.result // ""), ($t.artifacts // ""), $t.assigned_to, $t.priority, $t.type, (.events | length)] as $h |
@@ -960,11 +959,12 @@ while true; do
             continue
             ;;
         /hist)
-            echo "== messages =="
-            sqlite3 -header -column "$DB_PATH" "SELECT id, role, substr(COALESCE(content,'<null>'),1,60) as content, COALESCE(raw_input,'') as raw_input, CASE WHEN thinking IS NULL THEN '' ELSE length(thinking) || ' chars' END as thinking FROM messages ORDER BY id" 2>/dev/null || echo "No messages"
+            _agent=$(chat_table_id)
+            echo "== messages (agent=$_agent) =="
+            sqlite3 -header -column "$AI_AGENT_DB" "SELECT id, role, substr(COALESCE(content,'<null>'),1,60) as content, COALESCE(raw_input,'') as raw_input, CASE WHEN thinking IS NULL THEN '' ELSE length(thinking) || ' chars' END as thinking FROM messages WHERE agent_id='$(printf "%s" "$_agent" | sed "s/'/''/g")' ORDER BY id" 2>/dev/null || echo "No messages"
             echo
-            echo "== tool_calls =="
-            sqlite3 -header -column "$DB_PATH" "SELECT id, message_id, name, substr(COALESCE(arguments,'{}'),1,40) as arguments, length(COALESCE(result,'')) as result_len FROM tool_calls ORDER BY message_id, rowid" 2>/dev/null || echo "No tool calls"
+            echo "== tool_calls (agent=$_agent) =="
+            sqlite3 -header -column "$AI_AGENT_DB" "SELECT id, message_id, name, substr(COALESCE(arguments,'{}'),1,40) as arguments, length(COALESCE(result,'')) as result_len FROM tool_calls WHERE agent_id='$(printf "%s" "$_agent" | sed "s/'/''/g")' ORDER BY message_id, rowid" 2>/dev/null || echo "No tool calls"
             continue
             ;;
         /tools*)

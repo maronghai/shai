@@ -5,7 +5,7 @@
 # All string fields are JSON-escaped; output is single-line parseable.
 
 input="$1"
-db="${TEAM_DB_PATH:-/data/team.db}"
+db="${AI_AGENT_DB:-/data/ai-agent.db}"
 
 task_id=$(printf '%s\n' "$input" | jq -r '.task_id // ""' 2>/dev/null)
 if [ -z "$task_id" ] || ! printf '%s' "$task_id" | grep -qE '^[0-9]+$'; then

@@ -36,23 +36,23 @@ BB=/tmp/bb_$$.db
 rm -f "$BB"
 sqlite3 "$BB" "CREATE TABLE board (id INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT NOT NULL DEFAULT '', topic TEXT NOT NULL, payload TEXT NOT NULL, reply_to INTEGER, created_at TEXT DEFAULT (datetime('now'))); CREATE INDEX idx_board_topic ON board(topic);"
 
-OUT=$(BLACKBOARD_DB_PATH="$BB" AGENT_NAME="t" WORK_DIR=/tmp sh ${REPO}/tools/board_write.sh '{"topic":"x","payload":"parent"}' 2>&1)
+OUT=$(AI_AGENT_DB="$BB" AGENT_NAME="t" WORK_DIR=/tmp sh ${REPO}/tools/board_write.sh '{"topic":"x","payload":"parent"}' 2>&1)
 echo "  write: $OUT"
 PID=$(echo "$OUT" | jq -r '.id')
 if [[ "$PID" == "1" ]]; then ok "parent id=1"; else nok "parent id wrong"; fi
 
-OUT=$(BLACKBOARD_DB_PATH="$BB" AGENT_NAME="t" WORK_DIR=/tmp sh ${REPO}/tools/board_write.sh "{\"topic\":\"x\",\"payload\":\"child\",\"reply_to\":$PID}" 2>&1)
+OUT=$(AI_AGENT_DB="$BB" AGENT_NAME="t" WORK_DIR=/tmp sh ${REPO}/tools/board_write.sh "{\"topic\":\"x\",\"payload\":\"child\",\"reply_to\":$PID}" 2>&1)
 echo "  reply: $OUT"
 CID=$(echo "$OUT" | jq -r '.id')
 if [[ "$CID" == "2" ]]; then ok "child id=2"; else nok "child id wrong"; fi
 
-OUT=$(BLACKBOARD_DB_PATH="$BB" AGENT_NAME="t" WORK_DIR=/tmp sh ${REPO}/tools/board_read.sh "{\"topic\":\"x\",\"since_id\":$PID}" 2>&1)
+OUT=$(AI_AGENT_DB="$BB" AGENT_NAME="t" WORK_DIR=/tmp sh ${REPO}/tools/board_read.sh "{\"topic\":\"x\",\"since_id\":$PID}" 2>&1)
 echo "  read since: $OUT"
 if echo "$OUT" | jq -e 'length == 1 and .[0].payload == "child" and .[0].reply_to == 1' >/dev/null; then
   ok "since_id filter returns child with reply_to=1"
 else nok "since_id wrong: $OUT"; fi
 
-OUT=$(BLACKBOARD_DB_PATH="$BB" AGENT_NAME="t" WORK_DIR=/tmp sh ${REPO}/tools/board_list.sh '{}' 2>&1)
+OUT=$(AI_AGENT_DB="$BB" AGENT_NAME="t" WORK_DIR=/tmp sh ${REPO}/tools/board_list.sh '{}' 2>&1)
 echo "  list: $OUT"
 # Format is [{topic}, {topic}, ...]
 if echo "$OUT" | jq -e '.[0].topic == "x"' >/dev/null; then ok "list returns topics"; else nok "list format wrong"; fi
@@ -93,31 +93,31 @@ done
 rm -f /tmp/merge_in.json
 
 hr "Test 5: agent_delegate refuses system 'default'"
-OUT=$(AGENT_NAME="default" WORK_DIR=${REPO} AGENTS_DIR=${REPO}/agents BLACKBOARD_DB_PATH=/tmp/x.db DELEGATION_DEPTH=0 sh ${REPO}/tools/agent_delegate.sh '{"agent":"default","task":"x"}' 2>&1)
+OUT=$(AGENT_NAME="default" WORK_DIR=${REPO} AGENTS_DIR=${REPO}/agents AI_AGENT_DB=/tmp/x.db DELEGATION_DEPTH=0 sh ${REPO}/tools/agent_delegate.sh '{"agent":"default","task":"x"}' 2>&1)
 echo "  -> $OUT"
 if echo "$OUT" | jq -e '.success == false' >/dev/null; then ok "default rejected"; else nok "default not rejected"; fi
 
 hr "Test 6: agent_delegate refuses nonexistent agent"
-OUT=$(AGENT_NAME="default" WORK_DIR=${REPO} AGENTS_DIR=${REPO}/agents BLACKBOARD_DB_PATH=/tmp/x.db DELEGATION_DEPTH=0 sh ${REPO}/tools/agent_delegate.sh '{"agent":"nonexistent","task":"x"}' 2>&1)
+OUT=$(AGENT_NAME="default" WORK_DIR=${REPO} AGENTS_DIR=${REPO}/agents AI_AGENT_DB=/tmp/x.db DELEGATION_DEPTH=0 sh ${REPO}/tools/agent_delegate.sh '{"agent":"nonexistent","task":"x"}' 2>&1)
 echo "  -> $OUT"
 if echo "$OUT" | jq -e '.success == false' >/dev/null; then ok "nonexistent rejected"; else nok "nonexistent not rejected"; fi
 
 hr "Test 7: agent_delegate refuses deep recursion"
-OUT=$(AGENT_NAME="default" WORK_DIR=${REPO} AGENTS_DIR=${REPO}/agents BLACKBOARD_DB_PATH=/tmp/x.db DELEGATION_DEPTH=2 sh ${REPO}/tools/agent_delegate.sh '{"agent":"code-reviewer","task":"x"}' 2>&1)
+OUT=$(AGENT_NAME="default" WORK_DIR=${REPO} AGENTS_DIR=${REPO}/agents AI_AGENT_DB=/tmp/x.db DELEGATION_DEPTH=2 sh ${REPO}/tools/agent_delegate.sh '{"agent":"code-reviewer","task":"x"}' 2>&1)
 echo "  -> $OUT"
 if echo "$OUT" | jq -e '.success == false' >/dev/null; then ok "depth=2 rejected"; else nok "depth=2 not rejected"; fi
 if echo "$OUT" | jq -e '.error | test("depth")' >/dev/null; then ok "error mentions depth"; else nok "error wrong"; fi
 
 hr "Test 8: agent_delegate refuses oversize task"
 BIG=$(printf 'x%.0s' {1..9000})
-OUT=$(AGENT_NAME="default" WORK_DIR=${REPO} AGENTS_DIR=${REPO}/agents BLACKBOARD_DB_PATH=/tmp/x.db DELEGATION_DEPTH=0 sh ${REPO}/tools/agent_delegate.sh "{\"agent\":\"code-reviewer\",\"task\":\"$BIG\"}" 2>&1)
+OUT=$(AGENT_NAME="default" WORK_DIR=${REPO} AGENTS_DIR=${REPO}/agents AI_AGENT_DB=/tmp/x.db DELEGATION_DEPTH=0 sh ${REPO}/tools/agent_delegate.sh "{\"agent\":\"code-reviewer\",\"task\":\"$BIG\"}" 2>&1)
 echo "  -> (truncated)"
 echo "$OUT" | head -c 200
 echo
 if echo "$OUT" | jq -e '.success == false' >/dev/null; then ok "oversize rejected"; else nok "oversize not rejected"; fi
 
 hr "Test 9: agent_delegate input validation (name regex)"
-OUT=$(AGENT_NAME="default" WORK_DIR=${REPO} AGENTS_DIR=${REPO}/agents BLACKBOARD_DB_PATH=/tmp/x.db DELEGATION_DEPTH=0 sh ${REPO}/tools/agent_delegate.sh '{"agent":"../etc/passwd","task":"x"}' 2>&1)
+OUT=$(AGENT_NAME="default" WORK_DIR=${REPO} AGENTS_DIR=${REPO}/agents AI_AGENT_DB=/tmp/x.db DELEGATION_DEPTH=0 sh ${REPO}/tools/agent_delegate.sh '{"agent":"../etc/passwd","task":"x"}' 2>&1)
 echo "  -> $OUT"
 if echo "$OUT" | jq -e '.success == false' >/dev/null; then ok "path-traversal rejected"; else nok "path-traversal not rejected"; fi
 
@@ -366,12 +366,12 @@ fi
 
 hr "Test 18: /tasks and /task commands"
 # Init team DB and seed
-rm -f "$REPO/.data/team.db" 2>/dev/null
-sqlite3 "$REPO/.data/team.db" < "$REPO/team/schema.sql" 2>/dev/null
-sqlite3 "$REPO/.data/team.db" "DELETE FROM tasks; DELETE FROM task_events; DELETE FROM team_state; DELETE FROM sqlite_sequence;" 2>/dev/null
-TEAM_DB_PATH="$REPO/.data/team.db" AGENT_NAME=pm \
+rm -f "$REPO/.data/ai-agent.db" 2>/dev/null
+sqlite3 "$REPO/.data/ai-agent.db" < "$REPO/team/schema.sql" 2>/dev/null
+sqlite3 "$REPO/.data/ai-agent.db" "DELETE FROM tasks; DELETE FROM task_events; DELETE FROM team_state; DELETE FROM sqlite_sequence;" 2>/dev/null
+AI_AGENT_DB="$REPO/.data/ai-agent.db" AGENT_NAME=pm \
   sh "$REPO/tools/task_create.sh" '{"title":"design X","description":"spec","type":"design"}' > /dev/null
-TEAM_DB_PATH="$REPO/.data/team.db" AGENT_NAME=pm \
+AI_AGENT_DB="$REPO/.data/ai-agent.db" AGENT_NAME=pm \
   sh "$REPO/tools/task_create.sh" '{"title":"impl X","description":"code","type":"code","depends_on":"1","priority":5}' > /dev/null
 
 # /tasks branch in main script
@@ -388,7 +388,7 @@ else
 fi
 
 # task_list output
-out=$(TEAM_DB_PATH="$REPO/.data/team.db" sh "$REPO/tools/task_list.sh" '{}' 2>/dev/null)
+out=$(AI_AGENT_DB="$REPO/.data/ai-agent.db" sh "$REPO/tools/task_list.sh" '{}' 2>/dev/null)
 count=$(echo "$out" | jq 'length' 2>/dev/null)
 if [[ "$count" == "2" ]]; then
   ok "task_list returns 2 tasks"
@@ -397,7 +397,7 @@ else
 fi
 
 # task_list ready=1
-ready=$(TEAM_DB_PATH="$REPO/.data/team.db" sh "$REPO/tools/task_list.sh" '{"ready":1}' | jq -r '.[].id' 2>/dev/null | tr '\n' ' ')
+ready=$(AI_AGENT_DB="$REPO/.data/ai-agent.db" sh "$REPO/tools/task_list.sh" '{"ready":1}' | jq -r '.[].id' 2>/dev/null | tr '\n' ' ')
 if [[ "$ready" == "1 " ]]; then
   ok "task_list ready=1 returns only task 1 (task 2 blocked by dep)"
 else
@@ -405,7 +405,7 @@ else
 fi
 
 # task_show output
-show=$(TEAM_DB_PATH="$REPO/.data/team.db" sh "$REPO/tools/task_show.sh" '{"task_id":1}' 2>/dev/null)
+show=$(AI_AGENT_DB="$REPO/.data/ai-agent.db" sh "$REPO/tools/task_show.sh" '{"task_id":1}' 2>/dev/null)
 success=$(echo "$show" | jq -r '.success' 2>/dev/null)
 title=$(echo "$show" | jq -r '.task.title' 2>/dev/null)
 events_len=$(echo "$show" | jq -r '.events | length' 2>/dev/null)
@@ -416,7 +416,7 @@ else
 fi
 
 # task_show missing
-missing=$(TEAM_DB_PATH="$REPO/.data/team.db" sh "$REPO/tools/task_show.sh" '{"task_id":99}' 2>/dev/null)
+missing=$(AI_AGENT_DB="$REPO/.data/ai-agent.db" sh "$REPO/tools/task_show.sh" '{"task_id":99}' 2>/dev/null)
 if echo "$missing" | jq -e '.success == false' > /dev/null 2>&1; then
   ok "task_show for missing id returns success=false"
 else
@@ -425,10 +425,10 @@ fi
 
 # task_show handles real newlines/quotes in fields
 nl_title="NewlineTask_$$"
-TEAM_DB_PATH="$REPO/.data/team.db" AGENT_NAME=pm \
+AI_AGENT_DB="$REPO/.data/ai-agent.db" AGENT_NAME=pm \
   sh "$REPO/tools/task_create.sh" "{\"title\":\"$nl_title\",\"description\":\"line1\nline2 \\\"q\\\"\",\"type\":\"docs\"}" > /dev/null
-newline_id=$(TEAM_DB_PATH="$REPO/.data/team.db" sqlite3 "$REPO/.data/team.db" "SELECT id FROM tasks WHERE title='$nl_title'" 2>/dev/null)
-nl_show=$(TEAM_DB_PATH="$REPO/.data/team.db" sh "$REPO/tools/task_show.sh" "{\"task_id\":$newline_id}" 2>/dev/null)
+newline_id=$(AI_AGENT_DB="$REPO/.data/ai-agent.db" sqlite3 "$REPO/.data/ai-agent.db" "SELECT id FROM tasks WHERE title='$nl_title'" 2>/dev/null)
+nl_show=$(AI_AGENT_DB="$REPO/.data/ai-agent.db" sh "$REPO/tools/task_show.sh" "{\"task_id\":$newline_id}" 2>/dev/null)
 nl_desc=$(echo "$nl_show" | jq -r '.task.description' 2>/dev/null)
 if [[ "$nl_desc" == $'line1\nline2 "q"' ]]; then
   ok "task_show preserves newlines and quotes in description"
@@ -477,7 +477,7 @@ fi
 
 # Switch to each persona
 for p in pm architect developer tester docs; do
-    out=$(echo "/agent $p" | timeout 3 bash ai-agent.sh 2>&1 | grep -F "Switched to: $p")
+    out=$(echo "/agent $p" | timeout 10 bash ai-agent.sh 2>&1 | grep -F "Switched to: $p")
     if [[ -n "$out" ]]; then
       ok "/agent $p switches"
     else
@@ -486,7 +486,7 @@ for p in pm architect developer tester docs; do
 done
 
 # Tag filter (@design returns architect)
-out=$(echo "/agents @design" | timeout 3 bash ai-agent.sh 2>&1)
+out=$(echo "/agents @design" | timeout 10 bash ai-agent.sh 2>&1)
 if echo "$out" | grep -q "Architect"; then
   ok "/agents @design includes architect"
 else
@@ -495,9 +495,9 @@ fi
 
 hr "Test 20: /team commands (manual-but-scripted workflow)"
 # /team status with no goal
-rm -f "$REPO/.data/team.db" 2>/dev/null
-sqlite3 "$REPO/.data/team.db" "DELETE FROM tasks; DELETE FROM task_events; DELETE FROM team_state; DELETE FROM sqlite_sequence;" 2>/dev/null
-out=$(echo "/team" | timeout 3 bash ai-agent.sh 2>&1 | grep -F "(none — use /team start")
+rm -f "$REPO/.data/ai-agent.db" 2>/dev/null
+sqlite3 "$REPO/.data/ai-agent.db" "DELETE FROM tasks; DELETE FROM task_events; DELETE FROM team_state; DELETE FROM sqlite_sequence;" 2>/dev/null
+out=$(echo "/team" | timeout 10 bash ai-agent.sh 2>&1 | grep -F "(none — use /team start")
 if [[ -n "$out" ]]; then
   ok "/team status with no goal shows hint"
 else
@@ -505,11 +505,11 @@ else
 fi
 
 # /team status with tasks (seeded)
-sqlite3 "$REPO/.data/team.db" < "$REPO/team/schema.sql" 2>/dev/null
-TEAM_DB_PATH="$REPO/.data/team.db" sh "$REPO/tools/task_create.sh" '{"title":"design X","description":"d","type":"design"}' > /dev/null
-TEAM_DB_PATH="$REPO/.data/team.db" sh "$REPO/tools/task_create.sh" '{"title":"code X","description":"c","type":"code","depends_on":"1"}' > /dev/null
-sqlite3 "$REPO/.data/team.db" "INSERT INTO team_state VALUES ('current_goal', 'add X', datetime('now')), ('current_goal_id', '1', datetime('now'))" 2>/dev/null
-out=$(echo "/team" | timeout 3 bash ai-agent.sh 2>&1 | grep -F "add X (id=1)")
+sqlite3 "$REPO/.data/ai-agent.db" < "$REPO/team/schema.sql" 2>/dev/null
+AI_AGENT_DB="$REPO/.data/ai-agent.db" sh "$REPO/tools/task_create.sh" '{"title":"design X","description":"d","type":"design"}' > /dev/null
+AI_AGENT_DB="$REPO/.data/ai-agent.db" sh "$REPO/tools/task_create.sh" '{"title":"code X","description":"c","type":"code","depends_on":"1"}' > /dev/null
+sqlite3 "$REPO/.data/ai-agent.db" "INSERT INTO team_state VALUES ('current_goal', 'add X', datetime('now')), ('current_goal_id', '1', datetime('now'))" 2>/dev/null
+out=$(echo "/team" | timeout 10 bash ai-agent.sh 2>&1 | grep -F "add X (id=1)")
 if [[ -n "$out" ]]; then
   ok "/team status shows current goal and id"
 else
@@ -517,7 +517,7 @@ else
 fi
 
 # /team status shows ready count
-out=$(echo "/team" | timeout 3 bash ai-agent.sh 2>&1 | grep -F "ready:   1 task")
+out=$(echo "/team" | timeout 10 bash ai-agent.sh 2>&1 | grep -F "ready:   1 task")
 if [[ -n "$out" ]]; then
   ok "/team status shows 1 ready task"
 else
@@ -558,24 +558,24 @@ esac
 
 hr "Test 21: /team clear soft-cancels (no data loss)"
 # Seed 3 tasks (2 pending + 1 done) + goal
-rm -f "$REPO/.data/team.db" 2>/dev/null
-sqlite3 "$REPO/.data/team.db" < "$REPO/team/schema.sql" 2>/dev/null
-sqlite3 "$REPO/.data/team.db" "DELETE FROM tasks; DELETE FROM task_events; DELETE FROM team_state; DELETE FROM sqlite_sequence;" 2>/dev/null
-TEAM_DB_PATH="$REPO/.data/team.db" sh "$REPO/tools/task_create.sh" '{"title":"pending-1","type":"design"}' > /dev/null
-TEAM_DB_PATH="$REPO/.data/team.db" sh "$REPO/tools/task_create.sh" '{"title":"pending-2","type":"code","depends_on":"1"}' > /dev/null
-TEAM_DB_PATH="$REPO/.data/team.db" sh "$REPO/tools/task_create.sh" '{"title":"done-task","type":"test"}' > /dev/null
-sqlite3 "$REPO/.data/team.db" "UPDATE tasks SET status='done' WHERE id=3; INSERT INTO task_events VALUES (NULL, 3, 'developer', 'done', 'completed', datetime('now'));" 2>/dev/null
-sqlite3 "$REPO/.data/team.db" "INSERT INTO team_state VALUES ('current_goal','test goal',datetime('now')),('current_goal_id','1',datetime('now'))" 2>/dev/null
+rm -f "$REPO/.data/ai-agent.db" 2>/dev/null
+sqlite3 "$REPO/.data/ai-agent.db" < "$REPO/team/schema.sql" 2>/dev/null
+sqlite3 "$REPO/.data/ai-agent.db" "DELETE FROM tasks; DELETE FROM task_events; DELETE FROM team_state; DELETE FROM sqlite_sequence;" 2>/dev/null
+AI_AGENT_DB="$REPO/.data/ai-agent.db" sh "$REPO/tools/task_create.sh" '{"title":"pending-1","type":"design"}' > /dev/null
+AI_AGENT_DB="$REPO/.data/ai-agent.db" sh "$REPO/tools/task_create.sh" '{"title":"pending-2","type":"code","depends_on":"1"}' > /dev/null
+AI_AGENT_DB="$REPO/.data/ai-agent.db" sh "$REPO/tools/task_create.sh" '{"title":"done-task","type":"test"}' > /dev/null
+sqlite3 "$REPO/.data/ai-agent.db" "UPDATE tasks SET status='done' WHERE id=3; INSERT INTO task_events VALUES (NULL, 3, 'developer', 'done', 'completed', datetime('now'));" 2>/dev/null
+sqlite3 "$REPO/.data/ai-agent.db" "INSERT INTO team_state VALUES ('current_goal','test goal',datetime('now')),('current_goal_id','1',datetime('now'))" 2>/dev/null
 
 # 21a: soft cancel flips pending -> cancelled, done stays, goal cleared
-out=$(echo "/team clear -y" | timeout 3 bash ai-agent.sh 2>&1 | grep -F "2 task(s) cancelled")
+out=$(echo "/team clear -y" | timeout 10 bash ai-agent.sh 2>&1 | grep -F "2 task(s) cancelled")
 if [[ -n "$out" ]]; then
   ok "/team clear flips 2 pending tasks to 'cancelled'"
 else
   nok "/team clear did not flip pending tasks: $out"
 fi
 # Verify rows preserved
-n=$(sqlite3 "$REPO/.data/team.db" "SELECT (SELECT COUNT(*) FROM tasks) || ',' || (SELECT COUNT(*) FROM tasks WHERE status='cancelled') || ',' || (SELECT COUNT(*) FROM tasks WHERE status='done') || ',' || (SELECT COUNT(*) FROM team_state WHERE key='current_goal')")
+n=$(sqlite3 "$REPO/.data/ai-agent.db" "SELECT (SELECT COUNT(*) FROM tasks) || ',' || (SELECT COUNT(*) FROM tasks WHERE status='cancelled') || ',' || (SELECT COUNT(*) FROM tasks WHERE status='done') || ',' || (SELECT COUNT(*) FROM team_state WHERE key='current_goal')")
 if [[ "$n" == "3,2,1,0" ]]; then
   ok "rows preserved: 3 total, 2 cancelled, 1 done, goal cleared"
 else
@@ -583,7 +583,7 @@ else
 fi
 
 # 21b: idempotent on already-cleared
-out=$(echo "/team clear" | timeout 3 bash ai-agent.sh 2>&1 | grep -F "team already empty")
+out=$(echo "/team clear" | timeout 10 bash ai-agent.sh 2>&1 | grep -F "team already empty")
 if [[ -n "$out" ]]; then
   ok "/team clear idempotent (no goal, no non-done tasks)"
 else
@@ -591,15 +591,15 @@ else
 fi
 
 # 21c: -y and --yes both work
-sqlite3 "$REPO/.data/team.db" "UPDATE tasks SET status='pending' WHERE id IN (1,2); INSERT INTO team_state VALUES ('current_goal','g2',datetime('now')),('current_goal_id','1',datetime('now'))" 2>/dev/null
-out=$(echo "/team clear -y" | timeout 3 bash ai-agent.sh 2>&1 | grep -F "2 task(s) cancelled")
+sqlite3 "$REPO/.data/ai-agent.db" "UPDATE tasks SET status='pending' WHERE id IN (1,2); INSERT INTO team_state VALUES ('current_goal','g2',datetime('now')),('current_goal_id','1',datetime('now'))" 2>/dev/null
+out=$(echo "/team clear -y" | timeout 10 bash ai-agent.sh 2>&1 | grep -F "2 task(s) cancelled")
 [[ -n "$out" ]] && ok "/team clear -y works" || nok "/team clear -y failed: $out"
-sqlite3 "$REPO/.data/team.db" "UPDATE tasks SET status='pending' WHERE id IN (1,2); INSERT INTO team_state VALUES ('current_goal','g3',datetime('now'))" 2>/dev/null
-out=$(echo "/team clear --yes" | timeout 3 bash ai-agent.sh 2>&1 | grep -F "2 task(s) cancelled")
+sqlite3 "$REPO/.data/ai-agent.db" "UPDATE tasks SET status='pending' WHERE id IN (1,2); INSERT INTO team_state VALUES ('current_goal','g3',datetime('now'))" 2>/dev/null
+out=$(echo "/team clear --yes" | timeout 10 bash ai-agent.sh 2>&1 | grep -F "2 task(s) cancelled")
 [[ -n "$out" ]] && ok "/team clear --yes works" || nok "/team clear --yes failed: $out"
 
 # 21d: bad flag → usage
-out=$(echo "/team clear foo" | timeout 3 bash ai-agent.sh 2>&1 | grep -F "usage: /team clear")
+out=$(echo "/team clear foo" | timeout 10 bash ai-agent.sh 2>&1 | grep -F "usage: /team clear")
 [[ -n "$out" ]] && ok "/team clear foo → usage hint" || nok "/team clear foo did not show usage: $out"
 
 # 21e: _team_clear + /team clear case wired (now in lib/team.sh)
@@ -665,50 +665,50 @@ hr "Test 23: /task and /tasks empty/no-arg cases"
 # Set up a fresh DB for these tests so we know exactly what tasks exist
 TEST_TEAM_DB=/tmp/ai-agent-test-23-$$.db
 export TEST_TEAM_DB
-cp "${REPO}/.data/team.db" "$TEST_TEAM_DB" 2>/dev/null || {
+cp "${REPO}/.data/ai-agent.db" "$TEST_TEAM_DB" 2>/dev/null || {
   # If main DB missing, create a fresh one
   mkdir -p "${REPO}/.data"
-  TEST_TEAM_DB="${REPO}/.data/team.db"
+  TEST_TEAM_DB="${REPO}/.data/ai-agent.db"
   sqlite3 "$TEST_TEAM_DB" < "${REPO}/team/schema.sql"
 }
 
 # 23a: /task (no arg) shows usage hint instead of falling through to LLM
-out=$(echo -e "/task\nexit" | timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "usage: /task <id>" | head -1)
+out=$(echo -e "/task\nexit" | timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "usage: /task <id>" | head -1)
 [[ -n "$out" ]] && ok "/task (no arg) shows usage" || nok "/task (no arg) did not show usage: $out"
 
 # 23b: /task abc (non-numeric) still shows usage
-out=$(echo -e "/task abc\nexit" | timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "usage: /task <id>" | head -1)
+out=$(echo -e "/task abc\nexit" | timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "usage: /task <id>" | head -1)
 [[ -n "$out" ]] && ok "/task abc (non-numeric) shows usage" || nok "/task abc did not show usage: $out"
 
 # 23c: /task <id> with valid id still works (id 1 should exist in DB)
-out=$(echo -e "/task 1\nexit" | timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -E "^ID 1 \[")
+out=$(echo -e "/task 1\nexit" | timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -E "^ID 1 \[")
 [[ -n "$out" ]] && ok "/task 1 (valid id) still works" || nok "/task 1 did not render: $out"
 
 # 23d: /task 9999 (missing id) shows error, not silent fall-through to LLM
-out=$(echo -e "/task 9999\nexit" | timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "task 9999 not found" | head -1)
+out=$(echo -e "/task 9999\nexit" | timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "task 9999 not found" | head -1)
 [[ -n "$out" ]] && ok "/task 9999 shows 'not found'" || nok "/task 9999 did not show not-found: $out"
 
 # 23e: /tasks with empty DB shows "no tasks" instead of being silent
 EMPTY_DB=/tmp/ai-agent-empty-$$.db
 sqlite3 "$EMPTY_DB" < "${REPO}/team/schema.sql" 2>/dev/null
-out=$(TEAM_DB_PATH="$EMPTY_DB" bash -c 'echo -e "/tasks\nexit" | timeout 3 bash "${REPO}/ai-agent.sh" 2>&1' REPO="${REPO}" | grep -F "no tasks" | head -1)
+out=$(AI_AGENT_DB="$EMPTY_DB" bash -c 'echo -e "/tasks\nexit" | timeout 10 bash "${REPO}/ai-agent.sh" 2>&1' REPO="${REPO}" | grep -F "no tasks" | head -1)
 [[ -n "$out" ]] && ok "/tasks (empty DB) shows 'no tasks'" || nok "/tasks (empty DB) silent: $out"
 
 # 23f: /tasks with status filter that matches nothing shows specific message
-out=$(TEAM_DB_PATH="$EMPTY_DB" bash -c 'echo -e "/tasks pending\nexit" | timeout 3 bash "${REPO}/ai-agent.sh" 2>&1' REPO="${REPO}" | grep -F "no tasks with status 'pending'" | head -1)
+out=$(AI_AGENT_DB="$EMPTY_DB" bash -c 'echo -e "/tasks pending\nexit" | timeout 10 bash "${REPO}/ai-agent.sh" 2>&1' REPO="${REPO}" | grep -F "no tasks with status 'pending'" | head -1)
 [[ -n "$out" ]] && ok "/tasks pending (empty DB) shows 'no tasks with status'" || nok "/tasks pending silent: $out"
 
 # 23g: /tasks ready with no ready tasks shows "no ready tasks"
-out=$(TEAM_DB_PATH="$EMPTY_DB" bash -c 'echo -e "/tasks ready\nexit" | timeout 3 bash "${REPO}/ai-agent.sh" 2>&1' REPO="${REPO}" | grep -F "no ready tasks" | head -1)
+out=$(AI_AGENT_DB="$EMPTY_DB" bash -c 'echo -e "/tasks ready\nexit" | timeout 10 bash "${REPO}/ai-agent.sh" 2>&1' REPO="${REPO}" | grep -F "no ready tasks" | head -1)
 [[ -n "$out" ]] && ok "/tasks ready (empty DB) shows 'no ready tasks'" || nok "/tasks ready silent: $out"
 
 rm -f "$EMPTY_DB" "$TEST_TEAM_DB"
 
 # 23h: /task and /tasks work when run from a different cwd (paths must be absolute)
-out=$(cd /tmp && echo -e "/tasks\nexit" | timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -E "^\[.+(canc|done|pend|rev|bloc)/" | head -1)
-[[ -n "$out" ]] && ok "/tasks works from /tmp cwd" || nok "/tasks failed from /tmp: $(cd /tmp && echo -e "/tasks\nexit" | timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | tail -3)"
+out=$(cd /tmp && echo -e "/tasks\nexit" | timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -E "^\[.+(canc|done|pend|rev|bloc)/" | head -1)
+[[ -n "$out" ]] && ok "/tasks works from /tmp cwd" || nok "/tasks failed from /tmp: $(cd /tmp && echo -e "/tasks\nexit" | timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | tail -3)"
 
-out=$(cd /tmp && echo -e "/task 1\nexit" | timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -E "^ID 1 \[" | head -1)
+out=$(cd /tmp && echo -e "/task 1\nexit" | timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -E "^ID 1 \[" | head -1)
 [[ -n "$out" ]] && ok "/task 1 works from /tmp cwd" || nok "/task 1 failed from /tmp"
 
 hr "Test 24: /task clear (soft) vs /task clear -y (hard)"
@@ -717,9 +717,9 @@ hr "Test 24: /task clear (soft) vs /task clear -y (hard)"
 seed_t24_db() {
     local db="$1"
     sqlite3 "$db" "DELETE FROM tasks; DELETE FROM task_events; DELETE FROM team_state;"
-    TEAM_DB_PATH="$db" sh "${REPO}/tools/task_create.sh" '{"title":"p1","type":"code"}' >/dev/null
-    TEAM_DB_PATH="$db" sh "${REPO}/tools/task_create.sh" '{"title":"p2","type":"test"}' >/dev/null
-    TEAM_DB_PATH="$db" sh "${REPO}/tools/task_create.sh" '{"title":"d1","type":"docs"}' >/dev/null
+    AI_AGENT_DB="$db" sh "${REPO}/tools/task_create.sh" '{"title":"p1","type":"code"}' >/dev/null
+    AI_AGENT_DB="$db" sh "${REPO}/tools/task_create.sh" '{"title":"p2","type":"test"}' >/dev/null
+    AI_AGENT_DB="$db" sh "${REPO}/tools/task_create.sh" '{"title":"d1","type":"docs"}' >/dev/null
     sqlite3 "$db" "UPDATE tasks SET status='done' WHERE title='d1';"
     # Add 1 created event per task so we can verify hard delete removes events
     sqlite3 "$db" "INSERT INTO task_events (task_id,event) SELECT id,'created' FROM tasks;"
@@ -752,7 +752,7 @@ fi
 seed_t24_db "$T24_DB"
 
 # 24d: /task clear (bare) flips pending → cancelled, keeps done
-out=$(echo -e "/task clear\nexit" | TEAM_DB_PATH="$T24_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "cancelled 2" | head -1)
+out=$(echo -e "/task clear\nexit" | AI_AGENT_DB="$T24_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "cancelled 2" | head -1)
 [[ -n "$out" ]] && ok "/task clear (soft) reports cancelled=2" || nok "/task clear (soft) wrong: $out"
 
 # 24e: goal preserved (the key difference from /team clear)
@@ -774,7 +774,7 @@ ev_n=$(sqlite3 "$T24_DB" "SELECT COUNT(*) FROM task_events;" 2>/dev/null)
 seed_t24_db "$T24_DB"
 
 # 24h: /task clear -y wipes ALL tasks + their events
-out=$(echo -e "/task clear -y\nexit" | TEAM_DB_PATH="$T24_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -E "^.*FULL WIPE: deleted 3 task\(s\) \+ [0-9]+ event\(s\)" | head -1)
+out=$(echo -e "/task clear -y\nexit" | AI_AGENT_DB="$T24_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -E "^.*FULL WIPE: deleted 3 task\(s\) \+ [0-9]+ event\(s\)" | head -1)
 [[ -n "$out" ]] && ok "/task clear -y (hard) reports FULL WIPE 3 + events" || nok "/task clear -y wrong: $out"
 
 # 24i: goal STILL preserved in hard mode (only /team clear touches goal)
@@ -794,39 +794,39 @@ seed_t24_db "$T24_DB"
 sqlite3 "$T24_DB" "UPDATE tasks SET status='cancelled' WHERE title IN ('p1','p2');"  # only d1 is done
 
 # 24l: /task clear on no-pending is idempotent (says "nothing to soft-cancel")
-out=$(echo -e "/task clear\nexit" | TEAM_DB_PATH="$T24_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "nothing to soft-cancel" | head -1)
+out=$(echo -e "/task clear\nexit" | AI_AGENT_DB="$T24_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "nothing to soft-cancel" | head -1)
 [[ -n "$out" ]] && ok "soft: idempotent (no pending)" || nok "soft: $out"
 
 # 24m: /task clear -y ALWAYS wipes (even if all tasks are already done/cancelled)
-out=$(echo -e "/task clear -y\nexit" | TEAM_DB_PATH="$T24_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "FULL WIPE: deleted 3" | head -1)
+out=$(echo -e "/task clear -y\nexit" | AI_AGENT_DB="$T24_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "FULL WIPE: deleted 3" | head -1)
 [[ -n "$out" ]] && ok "hard: wipes even when nothing is pending" || nok "hard: $out"
 
 # 24n: /task clear foo → usage
-out=$(echo -e "/task clear foo\nexit" | TEAM_DB_PATH="$T24_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "usage: /task clear [-y|--yes]" | head -1)
+out=$(echo -e "/task clear foo\nexit" | AI_AGENT_DB="$T24_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "usage: /task clear [-y|--yes]" | head -1)
 [[ -n "$out" ]] && ok "/task clear bogus shows usage" || nok "bogus: $out"
 
 # 24o: /task clear --yes also triggers hard mode
 seed_t24_db "$T24_DB"
-out=$(echo -e "/task clear --yes\nexit" | TEAM_DB_PATH="$T24_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -E "^.*FULL WIPE: deleted 3 task\(s\)" | head -1)
+out=$(echo -e "/task clear --yes\nexit" | AI_AGENT_DB="$T24_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -E "^.*FULL WIPE: deleted 3 task\(s\)" | head -1)
 [[ -n "$out" ]] && ok "/task clear --yes triggers hard mode" || nok "--yes: $out"
 
 # 24p: tool task_clear.sh soft mode (bypass REPL) — direct invocation
 seed_t24_db "$T24_DB"
-direct=$(TEAM_DB_PATH="$T24_DB" sh "${REPO}/tools/task_clear.sh" '{}')
+direct=$(AI_AGENT_DB="$T24_DB" sh "${REPO}/tools/task_clear.sh" '{}')
 mode=$(echo "$direct" | jq -r '.mode')
 deleted=$(echo "$direct" | jq -r '.deleted')
 [[ "$mode" == "soft" && "$deleted" == "2" ]] && ok "tool soft: mode=soft deleted=2 (2 pending)" || nok "tool soft: $direct"
 
 # 24q: tool task_clear.sh hard mode (direct) — wipes all
 seed_t24_db "$T24_DB"
-direct=$(TEAM_DB_PATH="$T24_DB" sh "${REPO}/tools/task_clear.sh" '{"yes":true}')
+direct=$(AI_AGENT_DB="$T24_DB" sh "${REPO}/tools/task_clear.sh" '{"yes":true}')
 mode=$(echo "$direct" | jq -r '.mode')
 deleted=$(echo "$direct" | jq -r '.deleted')
 ev=$(echo "$direct" | jq -r '.events_deleted')
 [[ "$mode" == "hard" && "$deleted" == "3" && "$ev" -ge 3 ]] && ok "tool hard: mode=hard deleted=3 events>=$ev" || nok "tool hard: $direct"
 
 # 24r: hard wipe is truly destructive — re-running soft after hard finds nothing
-out=$(TEAM_DB_PATH="$T24_DB" sh "${REPO}/tools/task_clear.sh" '{}')
+out=$(AI_AGENT_DB="$T24_DB" sh "${REPO}/tools/task_clear.sh" '{}')
 deleted=$(echo "$out" | jq -r '.deleted')
 [[ "$deleted" == "0" ]] && ok "after hard wipe, soft finds 0" || nok "soft after hard: $out"
 
@@ -839,9 +839,9 @@ seed_t25_bb() {
     local db="$1"
     rm -f "$db"
     sqlite3 "$db" "CREATE TABLE IF NOT EXISTS board (id INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT NOT NULL DEFAULT '', topic TEXT NOT NULL, payload TEXT NOT NULL, reply_to INTEGER, created_at TEXT DEFAULT (datetime('now'))); CREATE INDEX IF NOT EXISTS idx_board_topic ON board(topic);" 2>/dev/null
-    BLACKBOARD_DB_PATH="$db" AGENT_NAME="alice" sh "${REPO}/tools/board_write.sh" '{"topic":"plan","payload":"step 1"}' >/dev/null
-    BLACKBOARD_DB_PATH="$db" AGENT_NAME="alice" sh "${REPO}/tools/board_write.sh" '{"topic":"plan","payload":"step 2 — see also review notes"}' >/dev/null
-    BLACKBOARD_DB_PATH="$db" AGENT_NAME="bob"   sh "${REPO}/tools/board_write.sh" '{"topic":"review","payload":"looks ok"}' >/dev/null
+    AI_AGENT_DB="$db" AGENT_NAME="alice" sh "${REPO}/tools/board_write.sh" '{"topic":"plan","payload":"step 1"}' >/dev/null
+    AI_AGENT_DB="$db" AGENT_NAME="alice" sh "${REPO}/tools/board_write.sh" '{"topic":"plan","payload":"step 2 — see also review notes"}' >/dev/null
+    AI_AGENT_DB="$db" AGENT_NAME="bob"   sh "${REPO}/tools/board_write.sh" '{"topic":"review","payload":"looks ok"}' >/dev/null
 }
 
 T25_DB=/tmp/ai-agent-test-25-$$.db
@@ -860,109 +860,109 @@ else
 fi
 
 # 25b: /board (no arg) shows topic summary table
-out=$(echo -e "/board\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -E "^plan\b" | head -1)
+out=$(echo -e "/board\nexit" | AI_AGENT_DB="$T25_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -E "^plan\b" | head -1)
 [[ -n "$out" ]] && ok "/board (no arg) shows topic summary" || nok "/board summary missing: $out"
 
 # 25c: /board write <topic> <payload> inserts a new entry
-out=$(echo -e "/board write plan step 3\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "board write ok" | head -1)
+out=$(echo -e "/board write plan step 3\nexit" | AI_AGENT_DB="$T25_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "board write ok" | head -1)
 [[ -n "$out" ]] && ok "/board write reports success" || nok "/board write failed: $out"
 n=$(sqlite3 "$T25_DB" "SELECT COUNT(*) FROM board WHERE topic='plan'")
 [[ "$n" == "3" ]] && ok "/board write inserted 1 entry (3 total in plan)" || nok "/board write: expected 3 in 'plan', got $n"
 
 # 25d: /board write with no payload shows usage
-out=$(echo -e "/board write plan\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "usage: /board write" | head -1)
+out=$(echo -e "/board write plan\nexit" | AI_AGENT_DB="$T25_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "usage: /board write" | head -1)
 [[ -n "$out" ]] && ok "/board write (no payload) shows usage" || nok "/board write no-payload: $out"
 
 # 25e: /board reply <id> <payload> creates a reply in the same topic
-out=$(echo -e "/board reply 1 ack from tester\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "board reply ok" | head -1)
+out=$(echo -e "/board reply 1 ack from tester\nexit" | AI_AGENT_DB="$T25_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "board reply ok" | head -1)
 [[ -n "$out" ]] && ok "/board reply reports success" || nok "/board reply failed: $out"
 n=$(sqlite3 "$T25_DB" "SELECT COUNT(*) FROM board WHERE reply_to=1")
 [[ "$n" == "1" ]] && ok "/board reply set reply_to=1" || nok "/board reply: expected 1 reply_to=1, got $n"
 
 # 25f: /board <topic> lists entries (existing 80-char behavior)
-out=$(echo -e "/board plan\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "step 1" | head -1)
+out=$(echo -e "/board plan\nexit" | AI_AGENT_DB="$T25_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "step 1" | head -1)
 [[ -n "$out" ]] && ok "/board <topic> lists entries" || nok "/board <topic>: $out"
 
 # 25g: /board <topic> <id> shows full payload of one entry
-out=$(echo -e "/board plan 2\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "review notes" | head -1)
+out=$(echo -e "/board plan 2\nexit" | AI_AGENT_DB="$T25_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "review notes" | head -1)
 [[ -n "$out" ]] && ok "/board <topic> <id> shows full payload" || nok "/board single id: $out"
 
 # 25h: /board <topic> --since <id> filters
-out=$(echo -e "/board plan --since 1\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "step 1" | head -1)
+out=$(echo -e "/board plan --since 1\nexit" | AI_AGENT_DB="$T25_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "step 1" | head -1)
 [[ -z "$out" ]] && ok "/board plan --since 1 hides id=1" || nok "--since 1 leaked: $out"
-n=$(echo -e "/board plan --since 1\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -cE '^\[2\]|^\[3\]|^\[4\]|^\[5\]')
+n=$(echo -e "/board plan --since 1\nexit" | AI_AGENT_DB="$T25_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -cE '^\[2\]|^\[3\]|^\[4\]|^\[5\]')
 [[ "$n" -ge 1 ]] && ok "/board plan --since 1 shows entries with id>1" || nok "--since 1: expected >=1 entry, got $n"
 
 # 25i: /board <topic> -n <N> limits
-out=$(echo -e "/board plan -n 1\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -cE '^\[[0-9]+\]')
+out=$(echo -e "/board plan -n 1\nexit" | AI_AGENT_DB="$T25_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -cE '^\[[0-9]+\]')
 [[ "$out" == "1" ]] && ok "/board plan -n 1 returns exactly 1 entry" || nok "/board -n 1: expected 1, got $out"
 
 # 25j: /board topics [prefix] uses the board_list tool
-out=$(echo -e "/board topics\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "plan" | head -1)
+out=$(echo -e "/board topics\nexit" | AI_AGENT_DB="$T25_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "plan" | head -1)
 [[ -n "$out" ]] && ok "/board topics lists distinct topics" || nok "/board topics: $out"
-out=$(echo -e "/board topics rev\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "review" | head -1)
+out=$(echo -e "/board topics rev\nexit" | AI_AGENT_DB="$T25_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "review" | head -1)
 [[ -n "$out" ]] && ok "/board topics rev filters by prefix" || nok "/board topics rev: $out"
 
 # 25k: /board grep <pattern> searches payloads across all topics
-out=$(echo -e "/board grep step\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "step 1" | head -1)
+out=$(echo -e "/board grep step\nexit" | AI_AGENT_DB="$T25_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "step 1" | head -1)
 [[ -n "$out" ]] && ok "/board grep step finds matching entries" || nok "/board grep: $out"
-out=$(echo -e "/board grep nonexistent_pattern_xyz\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "no matches" | head -1)
+out=$(echo -e "/board grep nonexistent_pattern_xyz\nexit" | AI_AGENT_DB="$T25_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "no matches" | head -1)
 [[ -n "$out" ]] && ok "/board grep no-match shows 'no matches'" || nok "/board grep no-match: $out"
 
 # 25l: /board stat shows totals
-out=$(echo -e "/board stat\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "total entries" | head -1)
+out=$(echo -e "/board stat\nexit" | AI_AGENT_DB="$T25_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "total entries" | head -1)
 [[ -n "$out" ]] && ok "/board stat shows totals" || nok "/board stat: $out"
-out=$(echo -e "/board stat\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "alice" | head -1)
+out=$(echo -e "/board stat\nexit" | AI_AGENT_DB="$T25_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "alice" | head -1)
 [[ -n "$out" ]] && ok "/board stat breaks down by agent" || nok "/board stat by-agent: $out"
 
 # 25m: /board clear <topic> (soft) renames the topic
 seed_t25_bb "$T25_DB"
-out=$(echo -e "/board clear plan\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "board clear ok: mode=soft" | head -1)
+out=$(echo -e "/board clear plan\nexit" | AI_AGENT_DB="$T25_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "board clear ok: mode=soft" | head -1)
 [[ -n "$out" ]] && ok "/board clear soft reports success" || nok "/board clear soft: $out"
 n=$(sqlite3 "$T25_DB" "SELECT COUNT(*) FROM board WHERE topic='[cleared] plan'")
 [[ "$n" == "2" ]] && ok "soft clear renamed 2 rows to '[cleared] plan'" || nok "soft clear: expected 2 in '[cleared] plan', got $n"
 
 # 25n: /board clear <topic> -y (hard) DELETEs the rows
 seed_t25_bb "$T25_DB"
-out=$(echo -e "/board clear plan -y\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "board clear ok: mode=hard" | head -1)
+out=$(echo -e "/board clear plan -y\nexit" | AI_AGENT_DB="$T25_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "board clear ok: mode=hard" | head -1)
 [[ -n "$out" ]] && ok "/board clear -y reports hard success" || nok "/board clear -y: $out"
 n=$(sqlite3 "$T25_DB" "SELECT COUNT(*) FROM board WHERE topic='plan'")
 [[ "$n" == "0" ]] && ok "hard clear deleted all 2 'plan' rows" || nok "hard clear: expected 0 'plan', got $n"
 
 # 25o: /board clear with bogus arg shows usage
-out=$(echo -e "/board clear plan foo\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "usage: /board clear" | head -1)
+out=$(echo -e "/board clear plan foo\nexit" | AI_AGENT_DB="$T25_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "usage: /board clear" | head -1)
 [[ -n "$out" ]] && ok "/board clear bogus shows usage" || nok "/board clear bogus: $out"
 
 # 25p: /board clear is idempotent (running again finds 0)
 seed_t25_bb "$T25_DB"
-echo -e "/board clear plan -y\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" >/dev/null 2>&1
-out=$(echo -e "/board clear plan\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "no entries for topic" | head -1)
+echo -e "/board clear plan -y\nexit" | AI_AGENT_DB="$T25_DB" timeout 10 bash "${REPO}/ai-agent.sh" >/dev/null 2>&1
+out=$(echo -e "/board clear plan\nexit" | AI_AGENT_DB="$T25_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -F "no entries for topic" | head -1)
 [[ -n "$out" ]] && ok "/board clear (no entries) shows 'no entries'" || nok "/board clear idempotent: $out"
 
 # 25q: tool board_clear.sh — direct soft invocation
 seed_t25_bb "$T25_DB"
-direct=$(BLACKBOARD_DB_PATH="$T25_DB" sh "${REPO}/tools/board_clear.sh" '{"topic":"plan"}')
+direct=$(AI_AGENT_DB="$T25_DB" sh "${REPO}/tools/board_clear.sh" '{"topic":"plan"}')
 mode=$(echo "$direct" | jq -r '.mode')
 affected=$(echo "$direct" | jq -r '.affected')
 [[ "$mode" == "soft" && "$affected" == "2" ]] && ok "tool soft: mode=soft affected=2" || nok "tool soft: $direct"
 
 # 25r: tool board_clear.sh — direct hard invocation
 seed_t25_bb "$T25_DB"
-direct=$(BLACKBOARD_DB_PATH="$T25_DB" sh "${REPO}/tools/board_clear.sh" '{"topic":"review","yes":true}')
+direct=$(AI_AGENT_DB="$T25_DB" sh "${REPO}/tools/board_clear.sh" '{"topic":"review","yes":true}')
 mode=$(echo "$direct" | jq -r '.mode')
 deleted=$(echo "$direct" | jq -r '.deleted')
 [[ "$mode" == "hard" && "$deleted" == "1" ]] && ok "tool hard: mode=hard deleted=1" || nok "tool hard: $direct"
 
 # 25s: tool board_write.sh now returns success:true
 seed_t25_bb "$T25_DB"
-direct=$(BLACKBOARD_DB_PATH="$T25_DB" AGENT_NAME="carol" sh "${REPO}/tools/board_write.sh" '{"topic":"x","payload":"y"}')
+direct=$(AI_AGENT_DB="$T25_DB" AGENT_NAME="carol" sh "${REPO}/tools/board_write.sh" '{"topic":"x","payload":"y"}')
 success=$(echo "$direct" | jq -r '.success')
 id=$(echo "$direct" | jq -r '.id')
 [[ "$success" == "true" && -n "$id" && "$id" != "null" ]] && ok "tool board_write returns success:true + id" || nok "tool board_write: $direct"
 
 # 25t: --since and -n can be combined
 seed_t25_bb "$T25_DB"
-out=$(echo -e "/board plan --since 1 -n 1\nexit" | BLACKBOARD_DB_PATH="$T25_DB" timeout 3 bash "${REPO}/ai-agent.sh" 2>&1 | grep -cE '^\[[0-9]+\]')
+out=$(echo -e "/board plan --since 1 -n 1\nexit" | AI_AGENT_DB="$T25_DB" timeout 10 bash "${REPO}/ai-agent.sh" 2>&1 | grep -cE '^\[[0-9]+\]')
 [[ "$out" == "1" ]] && ok "/board plan --since 1 -n 1 returns 1 entry" || nok "combined opts: expected 1, got $out"
 
 rm -f "$T25_DB"

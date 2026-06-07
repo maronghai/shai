@@ -2,7 +2,7 @@
   "type": "function",
   "function": {
     "name": "task_create",
-    "description": "Create a new task in the team queue (.data/team.db). The task starts in 'pending' state and is unassigned. Returns the new task id.",
+    "description": "Create a new task in the team queue (.data/ai-agent.db). The task starts in 'pending' state and is unassigned. Returns the new task id.",
     "parameters": {
       "type": "object",
       "properties": {

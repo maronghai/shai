@@ -1,6 +1,6 @@
 #!/bin/sh
 input="$1"
-db="${BLACKBOARD_DB_PATH:-/data/blackboard.db}"
+db="${AI_AGENT_DB:-/data/ai-agent.db}"
 
 topic=$(printf "%s\n" "$input" | jq -r '.topic // ""' 2>/dev/null)
 since=$(printf "%s\n" "$input" | jq -r '.since_id // 0' 2>/dev/null)

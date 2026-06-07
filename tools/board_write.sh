@@ -1,6 +1,6 @@
 #!/bin/sh
 input="$1"
-db="${BLACKBOARD_DB_PATH:-/data/blackboard.db}"
+db="${AI_AGENT_DB:-/data/ai-agent.db}"
 agent="${AGENT_NAME:-}"
 
 topic=$(printf "%s\n" "$input" | jq -r '.topic // ""' 2>/dev/null)

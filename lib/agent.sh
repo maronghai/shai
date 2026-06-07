@@ -3,15 +3,16 @@
 # Sourced by ai-agent.sh. Provides:
 #   - list_agents:           numbered list, optional @tag filter
 #   - _resolve_agent_id:     1-based id -> agent name
-#   - switch_agent:          switch active persona (updates DB, history, tools)
-#   - agent_status:          print current agent metadata
+#   - switch_agent:          switch active persona (sets CURRENT_AGENT)
+#   - agent_status:          print current agent metadata (per-agent msg count)
 #   - _agent_prompt:         build the REPL prompt string
 #   - parse_frontmatter:     extract description+tags from `---` block
 #   - agent_description:     frontmatter description or H1 fallback
 #   - agent_tags:            frontmatter tags CSV
 #   - _agent_matches_tag:    case where a tag filter matches
 #
-# All functions read $CURRENT_AGENT / $AGENTS_DIR / $WORK_DIR / $DB_PATH at call time.
+# All chat rows are now partitioned by agent_id inside the single $AI_AGENT_DB.
+# Functions that need per-agent info filter with $(chat_table_id).
 
 list_agents() {
     local filter_tag="${1:-}"
@@ -98,10 +99,8 @@ switch_agent() {
         rm -f "$CURRENT_AGENT_FILE" 2>/dev/null || true
     fi
 
-    DB_PATH=$(db_path)
-    TOOLS_CACHE="$DATA_DIR/tools_cache${CURRENT_AGENT:+_$CURRENT_AGENT}.json"
-    TOOLS_DESC_CACHE="$DATA_DIR/tools_desc${CURRENT_AGENT:+_$CURRENT_AGENT}.txt"
-
+    # All chat data is in $AI_AGENT_DB (single file), partitioned by agent_id.
+    # Switching agents only changes $CURRENT_AGENT; the DB path stays the same.
     SYSTEM_PROMPT="$(load_system_prompt)"
 
     init_db
@@ -113,9 +112,10 @@ switch_agent() {
 }
 
 agent_status() {
-    local cur msgs_n tools_n
+    local cur msgs_n tools_n agent
     if [[ -z "$CURRENT_AGENT" ]]; then cur="default"; else cur="$CURRENT_AGENT"; fi
-    msgs_n=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM messages" 2>/dev/null || echo 0)
+    agent=$(chat_table_id)
+    msgs_n=$(sqlite3 "$AI_AGENT_DB" "SELECT COUNT(*) FROM messages WHERE agent_id=$(db_quote "$agent")" 2>/dev/null || echo 0)
     tools_n=$(echo "$tools_json" | jq 'length' 2>/dev/null || echo 0)
     local desc tags f
     if [[ -n "$CURRENT_AGENT" ]]; then f="$AGENTS_DIR/$CURRENT_AGENT/system.md"; else f="${WORK_DIR}/SYSTEM_PROMPT.md"; fi
@@ -124,7 +124,7 @@ agent_status() {
     printf 'name=%s\n' "$cur"
     [[ -n "$desc" ]] && printf 'description=%s\n' "$desc"
     [[ -n "$tags" ]] && printf 'tags=%s\n' "$tags"
-    printf 'db=%s msgs=%s tools=%s\n' "$DB_PATH" "$msgs_n" "$tools_n"
+    printf 'db=%s msgs=%s tools=%s\n' "$AI_AGENT_DB" "$msgs_n" "$tools_n"
 }
 
 # Build the REPL prompt. Format:

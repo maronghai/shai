@@ -2,11 +2,11 @@
 # task_done.sh - mark a task as done and record the result.
 #
 # Env:
-#   TEAM_DB_PATH   - path to team.db
+#   AI_AGENT_DB    - path to the unified ai-agent.db
 #   AGENT_NAME     - name of the calling agent
 
 input="$1"
-db="${TEAM_DB_PATH:-/data/team.db}"
+db="${AI_AGENT_DB:-/data/ai-agent.db}"
 agent="${AGENT_NAME:-}"
 
 task_id=$(printf "%s\n" "$input" | jq -r '.task_id // ""' 2>/dev/null)

@@ -4,6 +4,55 @@ All notable changes to **ai-agent.sh** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] - 2026-06-07
+
+### Changed
+- **Unified SQLite database.** All four logical stores now live in a single
+  file: **`.data/ai-agent.db`**.
+  - **Before (v0.1.0):** three separate databases — `.data/chat.db` (and one
+    per agent: `.data/chat_<name>.db`), `.data/blackboard.db`, and
+    `.data/team.db` — each with its own path, schema, and env-var override.
+  - **After:** one DB at `$AI_AGENT_DB` (default: `.data/ai-agent.db`)
+    containing six tables:
+    - `messages` / `tool_calls` — per-agent chat history. Each row carries an
+      `agent_id` column; the primary key is `(agent_id, id)`. Each agent has
+      its own independent id sequence starting at 1. **Per-agent isolation
+      is preserved at the row level**; cross-agent queries are simple
+      `WHERE`-less SELECTs.
+    - `board` — inter-agent blackboard (unchanged schema).
+    - `tasks` / `task_events` / `team_state` — team workflow (unchanged).
+  - **Env var:** `$BLACKBOARD_DB_PATH` and `$TEAM_DB_PATH` are removed. Use
+    `$AI_AGENT_DB` to override the unified path.
+  - **Migration:** destructive. The old `.data/chat*.db`, `.data/blackboard.db`,
+    and `.data/team.db` files are **not** read by the new code. Any data in
+    them is silently ignored (not migrated, not deleted). Back them up
+    manually before upgrading if you want to keep them.
+  - **True wipe:** `rm -f .data/ai-agent.db` (replaces three separate rm
+    commands from v0.1.0).
+  - **Cross-table transactions/JOINs are now possible** (e.g. a board reply
+    and a `task_done` can be atomic; you can `SELECT` a task's claimer
+    alongside their most recent message).
+  - **Schema lives in one place:** `team/schema.sql` now contains all six
+    tables; `init_db` is a single call that creates them all idempotently.
+
+### Added
+- **`chat_table_id` helper.** Echoes the `agent_id` used to partition chat
+  rows (`"default"` for no-agent context, otherwise the agent's name).
+  Replaces the old `db_path()` per-agent file dispatch.
+- **`next_chat_id` helper.** Computes the next per-agent id as
+  `MAX(id) + 1` (or 1 for a new agent). Used by `add_message` and
+  `save_assistant_tool_call` to keep each agent's id sequence independent.
+
+### Notes
+- The user-visible UX is unchanged: `/agent pm` still shows you only pm's
+  history, `/hist` still renders only the current agent's messages, etc.
+- The tools cache files (`tools_cache[_<agent>].json`,
+  `tools_desc[_<agent>].txt`) are unchanged — they live on disk as JSON/txt
+  next to the DB, not inside it.
+- All 173 existing tests pass against the new unified DB. The test fixture
+  file path was updated (`.data/team.db` → `.data/ai-agent.db`,
+  `TEAM_DB_PATH=...` → `AI_AGENT_DB=...`).
+
 ## [0.1.0] - 2026-06-02
 
 ### Fixed

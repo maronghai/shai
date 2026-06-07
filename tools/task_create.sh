@@ -2,13 +2,13 @@
 # task_create.sh - create a new task in the team queue.
 #
 # Env:
-#   TEAM_DB_PATH   - path to team.db (default: /data/team.db)
+#   AI_AGENT_DB    - path to the unified ai-agent.db (default: /data/ai-agent.db)
 #   AGENT_NAME     - name of the calling agent (recorded in event log)
 #
 # Reads JSON from $1, returns JSON.
 
 input="$1"
-db="${TEAM_DB_PATH:-/data/team.db}"
+db="${AI_AGENT_DB:-/data/ai-agent.db}"
 agent="${AGENT_NAME:-}"
 
 title=$(printf "%s\n" "$input" | jq -r '.title // ""' 2>/dev/null)

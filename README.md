@@ -55,7 +55,7 @@ CHANGELOG.md         Version history
 .editorconfig        Editor defaults
 .shellcheckrc        shellcheck config
 tools/               Tool definitions (JSON is the full OpenAI spec; `.sh` bound via `run.script`)
-team/                AI Coding Team schema (v0.0.14+; `schema.sql` for `.data/team.db`)
+team/                AI Coding Team schema (v0.0.14+; `schema.sql` now contains the unified ai-agent.db schema — messages, tool_calls, board, tasks, task_events, team_state)
 tests/               LLM-free test suite (21 groups, 96 sub-assertions)
 .data/               Runtime data (SQLite, cache, history) — gitignored
 .tmp/                Runtime temp files — gitignored
@@ -182,7 +182,7 @@ Commands:
 
 Built-in tools for inter-agent communication:
 
-- `board_write` — write a row to the shared blackboard (`.data/blackboard.db`)
+- `board_write` — write a row to the shared blackboard (in `.data/ai-agent.db`)
 - `board_read` — read rows for a topic, optionally after a known id
 - `board_list` — list distinct topics (with optional prefix filter)
 - `agent_list` — list available agents and their one-line descriptions
@@ -190,12 +190,18 @@ Built-in tools for inter-agent communication:
   `exec_command` and `agent_delegate` removed from its toolset and depth capped
   at 2. The sub-agent's final reply is returned to the caller.
 
-Storage:
+Storage (all in one file: **`.data/ai-agent.db`**):
 
-- The default / unswitched context uses `.data/chat.db` and `SYSTEM_PROMPT.md`.
-- Each named agent gets its own `.data/chat_<name>.db` and
-  `agents/<name>/system.md`, so histories never bleed across personas.
-- The blackboard is shared (`.data/blackboard.db`) so agents can coordinate.
+- The default / unswitched context uses `SYSTEM_PROMPT.md`. All chat
+  history (default + every named agent) is partitioned by an `agent_id`
+  column inside the same SQLite file. Switching agents changes which
+  partition the REPL reads/writes, never the DB file. Histories never
+  bleed across personas.
+- The blackboard (`board` table) and the team task queue (`tasks` /
+  `task_events` / `team_state`) are also in this same file. Override
+  the path with `$AI_AGENT_DB`. **Destructive:** old
+  `.data/chat*.db`, `.data/blackboard.db`, and `.data/team.db` files
+  from v0.1.0 are ignored — back them up manually if needed.
 
 Pre-built personas:
 
@@ -210,9 +216,9 @@ blackboard schema, and delegation safety model.
 ## AI Coding Team (v0.0.14+)
 
 On top of the multi-agent layer, `/team` adds a **persistent task queue**
-(`.data/team.db`) and a **dispatch loop** — `/team start` delegates the
-goal to the PM, who breaks it into tasks; `/team next` serially dispatches
-each ready task to its persona until all are `done`.
+(in the same `.data/ai-agent.db`) and a **dispatch loop** — `/team start`
+delegates the goal to the PM, who breaks it into tasks; `/team next`
+serially dispatches each ready task to its persona until all are `done`.
 
 ### 7 personas
 
@@ -243,7 +249,8 @@ each ready task to its persona until all are `done`.
 ### Task tools
 
 `task_create` / `task_list` / `task_claim` / `task_update` / `task_done` /
-`task_show` (persisted in `.data/team.db`; schema in `team/schema.sql`).
+`task_show` (persisted in the unified `.data/ai-agent.db`; schema in
+`team/schema.sql`).
 
 ### Dispatch loop
 

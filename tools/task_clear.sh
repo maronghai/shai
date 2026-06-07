@@ -14,7 +14,7 @@
 #
 # In both modes, team_state (current_goal / current_goal_id) is NOT modified.
 # Use /team clear if you also want the goal cleared.
-# For a true wipe of EVERYTHING in team.db (incl. team_state), use rm -f .data/team.db.
+# For a true wipe of EVERYTHING in the unified DB (incl. team_state, board, all chat), use rm -f .data/ai-agent.db.
 #
 # Output: {"success":true,"mode":"soft|hard",
 #           "deleted":N,  (soft: tasks flipped; hard: tasks removed)
@@ -23,10 +23,10 @@
 #           "total_after":Z}
 #
 # Env:
-#   TEAM_DB_PATH   - path to team.db
+#   AI_AGENT_DB    - path to the unified ai-agent.db
 
 input="$1"
-db="${TEAM_DB_PATH:-/data/team.db}"
+db="${AI_AGENT_DB:-/data/ai-agent.db}"
 
 # Parse input — does the caller want hard delete?
 hard=0

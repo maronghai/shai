@@ -8,7 +8,7 @@
 #       left alone (soft is idempotent).
 #   Idempotent: returns success even when there's nothing to clear.
 input="$1"
-db="${BLACKBOARD_DB_PATH:-/data/blackboard.db}"
+db="${AI_AGENT_DB:-/data/ai-agent.db}"
 
 yes=$(printf "%s\n" "$input" | jq -r '.yes // false' 2>/dev/null)
 topic=$(printf "%s\n" "$input" | jq -r '.topic // ""' 2>/dev/null)

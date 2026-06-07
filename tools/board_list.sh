@@ -1,6 +1,6 @@
 #!/bin/sh
 input="$1"
-db="${BLACKBOARD_DB_PATH:-/data/blackboard.db}"
+db="${AI_AGENT_DB:-/data/ai-agent.db}"
 
 prefix=$(printf "%s\n" "$input" | jq -r '.prefix // ""' 2>/dev/null)
 

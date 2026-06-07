@@ -4,14 +4,14 @@
 # Env (set by main script's run_tool):
 #   AGENT_NAME          - name of the calling agent
 #   DELEGATION_DEPTH    - integer; we increment by 1
-#   BLACKBOARD_DB_PATH  - path to blackboard.db
+#   AI_AGENT_DB        - path to the unified ai-agent.db
 #   WORK_DIR, AGENTS_DIR - main script's paths
 #
 # Args (from LLM function call):
 #   {agent, task, topic?}
 
 input="$1"
-db="${BLACKBOARD_DB_PATH:-/data/blackboard.db}"
+db="${AI_AGENT_DB:-/data/ai-agent.db}"
 work_dir="${WORK_DIR:-/data}"
 agents_dir="${AGENTS_DIR:-/data/agents}"
 from_agent="${AGENT_NAME:-}"
@@ -87,8 +87,7 @@ NON_INTERACTIVE=1 \
     PARENT_ID="$parent_id" \
     TASK="$task" \
     TOPIC="$topic" \
-    BLACKBOARD_DB_PATH="$db" \
-    TEAM_DB_PATH="${TEAM_DB_PATH:-}" \
+    AI_AGENT_DB="$db" \
     bash "$main_script" >/dev/null 2>&1 &
 child_pid=$!
 

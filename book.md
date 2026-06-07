@@ -172,7 +172,7 @@ Agent> 当前目录包含以下文件：
 - ai-agent.sh（主脚本）
 - SYSTEM_PROMPT.md（系统提示词）
 - .data/（数据目录）
-  - chat.db（对话历史数据库）
+  - ai-agent.db（**统一** SQLite 数据库：messages / tool_calls / board / tasks / task_events / team_state）
   - tools.json（工具定义）
 ```
 
@@ -397,17 +397,20 @@ Agent> init_db() 函数的实现如下：
 
 ### 6.1 存储架构
 
-所有消息存储在 SQLite 数据库 `.data/chat.db` 的 `messages` 表中：
+所有消息存储在**统一** SQLite 数据库 `.data/ai-agent.db` 的 `messages` 表中。
+每个 agent 的历史通过 `agent_id` 列分区，复合主键 `(agent_id, id)`，每个 agent
+拥有自己独立的 id 序列（从 1 开始）。
 
 ```sql
 CREATE TABLE messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    role TEXT NOT NULL,         -- system / user / assistant / tool
-    content TEXT,               -- 消息内容
-    user_input TEXT,            -- 用户的原始输入（仅 user 消息）
-    tool_calls TEXT,            -- 工具调用 JSON（仅 assistant 消息）
-    tool_call_id TEXT,          -- 工具调用 ID（仅 tool 消息）
-    created_at TEXT DEFAULT (datetime(now))
+    agent_id   TEXT NOT NULL DEFAULT 'default',
+    id         INTEGER NOT NULL,        -- per-agent 序列（从 1 开始）
+    role       TEXT NOT NULL CHECK (role IN ('system','user','assistant')),
+    content    TEXT,
+    raw_input  TEXT,                    -- 用户的原始输入（仅 user 消息）
+    thinking   TEXT,                    -- 思考链
+    created_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (agent_id, id)
 );
 ```
 
@@ -422,15 +425,18 @@ CREATE TABLE messages (
 
 ### 6.3 历史修剪
 
-`MAX_HISTORY=40` 限制最大消息数。超过时删除最早的消息：
+`MAX_HISTORY=40` 限制最大消息数。超过时删除最早的消息（按 per-agent 序列）：
 
 ```bash
 prune_history() {
-    count=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM messages")
+    local agent
+    agent=$(chat_table_id)              # current agent's partition
+    count=$(sqlite3 "$AI_AGENT_DB" "SELECT COUNT(*) FROM messages WHERE agent_id=$(db_quote "$agent")")
     if [[ $count -gt $MAX_HISTORY ]]; then
         remove=$((count - MAX_HISTORY))
-        sqlite3 "$DB_PATH" "DELETE FROM messages WHERE id IN 
-            (SELECT id FROM messages ORDER BY id LIMIT $remove)"
+        sqlite3 "$AI_AGENT_DB" "DELETE FROM messages
+            WHERE agent_id=$(db_quote "$agent") AND id IN
+                (SELECT id FROM messages WHERE agent_id=$(db_quote "$agent") ORDER BY id LIMIT $remove)"
     fi
 }
 ```
@@ -724,13 +730,13 @@ curl -sS https://api.deepseek.com/chat/completions \
 
 ### 9.4 对话历史损坏
 
-如果数据库出现问题，可以安全删除：
+如果数据库出现问题，可以安全删除（会清空所有 agent 的对话历史、board、tasks）：
 
 ```bash
-rm -rf .data/chat.db
+rm -rf .data/ai-agent.db
 ```
 
-下次启动时会自动重建。
+下次启动时会自动重建（`init_db` 调用 `team/schema.sql` 里的 `CREATE TABLE IF NOT EXISTS`）。
 
 ### 9.5 乱码或颜色显示问题
 
@@ -921,17 +927,16 @@ tools/
 ├── agent_delegate.{json,sh}    # 委派
 └── agent_list.{json,sh}        # 列出可用 agent
 .data/
-├── chat.db                # default agent 的历史
-├── chat_coordinator.db    # coordinator agent 的历史
-├── chat_code-reviewer.db  # code-reviewer agent 的历史
-├── blackboard.db          # 共享黑板
+├── ai-agent.db            # 统一 SQLite（messages/tool_calls/board/tasks/task_events/team_state）
 ├── .current_agent         # 持久化当前 agent 名
 ├── tools_cache.json       # default agent 的工具缓存
 ├── tools_cache_coordinator.json
 └── tools_desc.txt         # default agent 的工具描述缓存
 ```
 
-每个 agent 的历史是**独立**的：`.data/chat_<name>.db`（default 用 `.data/chat.db`）。切换 agent 不带历史跨过去。
+每个 agent 的历史是**独立**的：统一 `.data/ai-agent.db` 里通过 `agent_id` 列分区。
+`messages` 主键 `(agent_id, id)`，每个 agent 有自己的 id 序列（从 1 开始）。
+切换 agent 只改 `CURRENT_AGENT`，DB 文件不变。
 
 ### 13.3 切换命令
 
@@ -1028,7 +1033,7 @@ exit 1
 
 ### 13.6 Blackboard
 
-黑板是一个 SQLite 表，所有 agent 共享一个文件 `.data/blackboard.db`：
+黑板是一个 SQLite 表，所有 agent 共享——统一在 `.data/ai-agent.db` 的 `board` 表里：
 
 ```sql
 CREATE TABLE board (
@@ -1194,12 +1199,13 @@ You> /hist full 114     # 单条（_hist_full 风格）：id=114 的 `--- #id ro
 3. **派发循环**：coordinator 反复做"找下一个 ready 任务 → 派给对应
    agent → 等 reply → 标 done"这件事，直到所有任务完成。
 
-v0.0.14 加进来的就是这三件：`.data/team.db`（任务队列 + 状态机）+ 6 个
+v0.0.14 加进来的就是这三件：统一 `.data/ai-agent.db` 里的 `tasks` /
+`task_events` / `team_state` 三表（任务队列 + 状态机）+ 6 个
 task 工具（CRUD 接口）+ 4 个 `/team` 子命令（派发循环）。
 
 ### 14.2 任务表 schema
 
-`.data/team.db` 三个表（详细在 `team/schema.sql`）：
+`.data/ai-agent.db` 里跟 team 相关的三个表（详细在 `team/schema.sql`）：
 
 ```sql
 CREATE TABLE tasks (
@@ -1343,9 +1349,8 @@ pending / blocked / cancelled），每组下用紧凑一行展示。
 回车默认 N（不取消）。`-y` / `--yes` 跳过 prompt。脚本化场景（管道喂入）
 自动跳过 prompt（`-t 0` 假）。
 
-**彻底抹掉 team.db 的方法**：`clear` 是软操作，不删行。要真删所有审计，shell 里
-跑 `rm -f .data/team.db`——下次 `/team` 会自动 `init_team_db` 重建（`CREATE TABLE
-IF NOT EXISTS`）。
+**彻底抹掉 team 数据的方法**：`clear` 是软操作，不删行。要真删所有审计，shell 里
+跑 `rm -f .data/ai-agent.db`——下次启动 `init_db` 会自动从 `team/schema.sql` 重建。
 
 幂等：所有任务都是 done 或 cancelled、goal 也空时，`/team clear` 输出
 `team already empty (no tasks, no goal)`。
@@ -1512,9 +1517,10 @@ dispatching task #1 (type=spec, agent=pm): Goal: add /tasks command
   "After creating all tasks, write a summary to the blackboard"，
   `_team_next` 在 agent prompt 里也加这句。
 - **`task_create` 报 "insert failed: no such table: tasks"**：
-  PM 跑在 forked 子进程里，`TEAM_DB_PATH` 没透传过去，sub-agent
+  PM 跑在 forked 子进程里，旧版 `TEAM_DB_PATH` 没透传过去，sub-agent
   默认找错位置。**修法**：`agent_delegate.sh` 在 fork 前 export
-  `TEAM_DB_PATH=$PARENT_TEAM_DB_PATH`，sub-agent 的 env 自动继承。
+  `AI_AGENT_DB=$PARENT_AI_AGENT_DB`，sub-agent 的 env 自动继承
+  （v0.1.0+ 统一为一个 var 之后这个坑就只剩一个变量了）。
 
 ### 14.11 写在最后
 
@@ -1586,7 +1592,7 @@ ai-agent/
 ├── ai-agent.sh          # 主脚本
 ├── SYSTEM_PROMPT.md     # 系统提示词
 ├── .data/
-│   ├── chat.db          # 对话历史 SQLite
+│   ├── ai-agent.db      # 统一 SQLite（chat + board + tasks）
 │   ├── tools.json       # 工具定义
 │   └── .input_history   # readline 历史
 └── .tmp/

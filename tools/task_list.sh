@@ -8,10 +8,10 @@
 #   ready       - if "1", only pending tasks whose depends_on are all done
 #
 # Env:
-#   TEAM_DB_PATH   - path to team.db
+#   AI_AGENT_DB    - path to the unified ai-agent.db
 
 input="$1"
-db="${TEAM_DB_PATH:-/data/team.db}"
+db="${AI_AGENT_DB:-/data/ai-agent.db}"
 
 status=$(printf "%s\n" "$input" | jq -r '.status // ""' 2>/dev/null)
 type=$(printf "%s\n" "$input" | jq -r '.type // ""' 2>/dev/null)
